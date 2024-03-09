@@ -42,6 +42,8 @@ impl Winit {
             .with_title("niri");
         let (backend, winit) = winit::init_from_builder(builder)?;
 
+        backend.window().set_cursor_visible(false);
+
         let output = Output::new(
             "winit".to_string(),
             PhysicalProperties {
