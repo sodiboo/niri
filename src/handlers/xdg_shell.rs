@@ -70,7 +70,7 @@ pub fn resolve_window_rules(rules: &[WindowRule], window: &Window) -> ResolvedWi
             resolve_window_rules_for_predicate(rules, |m| toplevel_window_matches(&role, m))
         }),
         WindowSurface::X11(surface) => {
-            resolve_window_rules_for_predicate(rules, |m| x11_window_matches(&surface, m))
+            resolve_window_rules_for_predicate(rules, |m| x11_window_matches(surface, m))
         }
     }
 }

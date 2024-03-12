@@ -1,13 +1,10 @@
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 
-use smithay::desktop::space::SpaceElement;
-use smithay::desktop::{Window, WindowSurface};
-use smithay::input::pointer::Focus;
-use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER};
-use smithay::wayland::compositor::{get_parent, with_states};
+use smithay::desktop::Window;
+use smithay::utils::{Logical, Rectangle};
+use smithay::wayland::compositor::get_parent;
 use smithay::wayland::selection::data_device::{
     clear_data_device_selection, current_data_device_selection_userdata,
     request_data_device_client_selection, set_data_device_selection,
@@ -46,7 +43,7 @@ impl XwmHandler for State {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
-    fn destroyed_window(&mut self, _xwm: XwmId, window: X11Surface) {}
+    fn destroyed_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
         window.set_mapped(true).unwrap()
@@ -178,18 +175,18 @@ impl XwmHandler for State {
     fn resize_request(
         &mut self,
         _xwm: XwmId,
-        window: X11Surface,
+        _window: X11Surface,
         _button: u32,
-        edges: X11ResizeEdge,
+        _edges: X11ResizeEdge,
     ) {
         // FIXME
     }
 
-    fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
+    fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
         // FIXME
     }
 
-    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
         true
     }
 

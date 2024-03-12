@@ -1,7 +1,6 @@
 use std::collections::hash_map::Entry;
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
-use smithay::desktop::WindowSurface;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::reexports::calloop::Interest;
 use smithay::reexports::wayland_server::protocol::wl_buffer;
@@ -18,7 +17,6 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{delegate_compositor, delegate_shm};
 
-use crate::layout::LayoutElement;
 use crate::niri::{ClientState, State};
 use crate::utils::clone2;
 use crate::window::{InitialConfigureState, Unmapped};
@@ -260,18 +258,18 @@ impl CompositorHandler for State {
             }
         }
 
-        if let Some(i) = self
-            .niri
-            .override_redirect
-            .iter()
-            .position(|w| w.wl_surface().as_ref() == Some(surface))
-        {
-            debug!("commit of override-redirect window");
-            let xsurface = &self.niri.override_redirect[i];
-            self.niri.queue_redraw_all();
-            // if let Some(output) = self.niri.output_under_cursor() {
-            // }
-        }
+        // if let Some(i) = self
+        //     .niri
+        //     .override_redirect
+        //     .iter()
+        //     .position(|w| w.wl_surface().as_ref() == Some(surface))
+        // {
+        //     debug!("commit of override-redirect window");
+        //     let xsurface = &self.niri.override_redirect[i];
+        //     self.niri.queue_redraw_all();
+        //     // if let Some(output) = self.niri.output_under_cursor() {
+        //     // }
+        // }
     }
 }
 
