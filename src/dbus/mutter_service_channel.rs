@@ -6,7 +6,7 @@ use smithay::reexports::wayland_server::DisplayHandle;
 use zbus::dbus_interface;
 
 use super::Start;
-use crate::niri::ClientState;
+use crate::niri::NativeClientState;
 
 pub struct ServiceChannel {
     display: DisplayHandle,
@@ -25,7 +25,7 @@ impl ServiceChannel {
         }
 
         let (sock1, sock2) = UnixStream::pair().unwrap();
-        let data = Arc::new(ClientState {
+        let data = Arc::new(NativeClientState {
             compositor_state: Default::default(),
             // Would be nice to thread config here but for now it's fine.
             can_view_decoration_globals: false,

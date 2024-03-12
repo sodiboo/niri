@@ -13,6 +13,7 @@ use smithay::backend::input::{
     TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState, TouchEvent,
 };
 use smithay::backend::libinput::LibinputInputBackend;
+use smithay::desktop::WindowSurface;
 use smithay::input::keyboard::xkb::keysym_get_name;
 use smithay::input::keyboard::{keysyms, FilterResult, Keysym, ModifiersState};
 use smithay::input::pointer::{
@@ -25,6 +26,7 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 
+use crate::layout::LayoutElement;
 use crate::niri::State;
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::spawn;
@@ -429,7 +431,7 @@ impl State {
             }
             Action::CloseWindow => {
                 if let Some(window) = self.niri.layout.focus() {
-                    window.toplevel().expect("no x11 support").send_close();
+                    window.close()
                 }
             }
             Action::FullscreenWindow => {

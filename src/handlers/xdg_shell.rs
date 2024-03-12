@@ -2,7 +2,7 @@ use niri_config::{Match, WindowRule};
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface,
     PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
-    WindowSurfaceType,
+    WindowSurface, WindowSurfaceType,
 };
 use smithay::input::pointer::Focus;
 use smithay::output::Output;
@@ -12,9 +12,10 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::{se
 use smithay::reexports::wayland_server::protocol::wl_output;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Logical, Rectangle, Serial};
+use smithay::utils::{IsAlive, Logical, Rectangle, Serial};
 use smithay::wayland::compositor::{send_surface_state, with_states};
 use smithay::wayland::input_method::InputMethodSeat;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
 use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
@@ -22,6 +23,7 @@ use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgPopupSurfaceData, XdgShellHandler,
     XdgShellState, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
 };
+use smithay::xwayland::X11Surface;
 use smithay::{delegate_kde_decoration, delegate_xdg_decoration, delegate_xdg_shell};
 
 use crate::layout::workspace::ColumnWidth;
@@ -29,80 +31,81 @@ use crate::niri::{PopupGrabState, State};
 use crate::utils::clone2;
 use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped};
 
-fn window_matches(role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
-    if let Some(app_id_re) = &m.app_id {
-        let Some(app_id) = &role.app_id else {
-            return false;
-        };
-        if !app_id_re.is_match(app_id) {
-            return false;
-        }
-    }
-
-    if let Some(title_re) = &m.title {
-        let Some(title) = &role.title else {
-            return false;
-        };
-        if !title_re.is_match(title) {
-            return false;
-        }
-    }
-
-    true
+fn toplevel_window_matches(role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
+    m.app_id.as_ref().map_or(true, |re| {
+        role.app_id
+            .as_ref()
+            .map_or(false, |app_id| re.is_match(app_id))
+    }) && m.title.as_ref().map_or(true, |re| {
+        role.title
+            .as_ref()
+            .map_or(false, |title| re.is_match(title))
+    })
 }
 
-pub fn resolve_window_rules(
-    rules: &[WindowRule],
-    toplevel: &ToplevelSurface,
-) -> ResolvedWindowRules {
+fn x11_window_matches(surface: &X11Surface, m: &Match) -> bool {
+    m.app_id
+        .as_ref()
+        .map_or(true, |re| re.is_match(&surface.class()))
+        && m.title
+            .as_ref()
+            .map_or(true, |re| re.is_match(&surface.title()))
+}
+
+pub fn resolve_window_rules(rules: &[WindowRule], window: &Window) -> ResolvedWindowRules {
     let _span = tracy_client::span!("resolve_window_rules");
 
-    let mut resolved = ResolvedWindowRules::default();
+    match window.underlying_surface() {
+        WindowSurface::Wayland(toplevel) => with_states(toplevel.wl_surface(), |states| {
+            let role = states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .unwrap()
+                .lock()
+                .unwrap();
 
-    with_states(toplevel.wl_surface(), |states| {
-        let role = states
-            .data_map
-            .get::<XdgToplevelSurfaceData>()
-            .unwrap()
-            .lock()
-            .unwrap();
-
-        let mut open_on_output = None;
-
-        for rule in rules {
-            if !(rule.matches.is_empty() || rule.matches.iter().any(|m| window_matches(&role, m))) {
-                continue;
-            }
-
-            if rule.excludes.iter().any(|m| window_matches(&role, m)) {
-                continue;
-            }
-
-            if let Some(x) = rule
-                .default_column_width
-                .as_ref()
-                .map(|d| d.0.map(ColumnWidth::from))
-            {
-                resolved.default_width = Some(x);
-            }
-
-            if let Some(x) = rule.open_on_output.as_deref() {
-                open_on_output = Some(x);
-            }
-
-            if let Some(x) = rule.open_maximized {
-                resolved.open_maximized = Some(x);
-            }
-
-            if let Some(x) = rule.open_fullscreen {
-                resolved.open_fullscreen = Some(x);
-            }
+            resolve_window_rules_for_predicate(rules, |m| toplevel_window_matches(&role, m))
+        }),
+        WindowSurface::X11(surface) => {
+            resolve_window_rules_for_predicate(rules, |m| x11_window_matches(&surface, m))
         }
+    }
+}
 
-        resolved.open_on_output = open_on_output.map(|x| x.to_owned());
-    });
+fn resolve_window_rules_for_predicate(
+    rules: &[WindowRule],
+    f: impl Fn(&Match) -> bool,
+) -> ResolvedWindowRules {
+    let _span = tracy_client::span!("resolve_window_rules_for_predicate");
 
-    resolved
+    let mut default_width = None;
+    let mut open_on_output = None;
+    let mut open_maximized = None;
+    let mut open_fullscreen = None;
+    for rule in rules {
+        if rule.excludes.iter().any(&f) {
+            continue;
+        }
+        if !(rule.matches.is_empty() || rule.matches.iter().any(&f)) {
+            continue;
+        }
+        default_width = rule
+            .default_column_width
+            .as_ref()
+            .map(|d| d.0.map(ColumnWidth::from))
+            .or(default_width);
+
+        open_on_output = rule.open_on_output.as_deref().or(open_on_output);
+        open_maximized = rule.open_maximized.or(open_maximized);
+        open_fullscreen = rule.open_fullscreen.or(open_fullscreen);
+    }
+
+    ResolvedWindowRules {
+        default_width,
+        open_on_output: open_on_output.map(ToOwned::to_owned),
+        open_maximized,
+        open_fullscreen,
+    }
 }
 
 impl XdgShellHandler for State {
@@ -210,9 +213,7 @@ impl XdgShellHandler for State {
                 }
 
                 let layout_focus = self.niri.layout.focus();
-                if Some(&root)
-                    != layout_focus.map(|win| win.toplevel().expect("no x11 support").wl_surface())
-                {
+                if Some(&root) != layout_focus.map(|win| win.wl_surface().unwrap()).as_ref() {
                     let _ = PopupManager::dismiss_popup(&root, &popup);
                     return;
                 }
@@ -468,11 +469,11 @@ impl XdgShellHandler for State {
     }
 
     fn app_id_changed(&mut self, toplevel: ToplevelSurface) {
-        self.update_window_rules(&toplevel);
+        self.update_window_rules(&Window::new_wayland_window(toplevel));
     }
 
     fn title_changed(&mut self, toplevel: ToplevelSurface) {
-        self.update_window_rules(&toplevel);
+        self.update_window_rules(&Window::new_wayland_window(toplevel));
     }
 }
 
@@ -542,10 +543,15 @@ fn initial_configure_sent(toplevel: &ToplevelSurface) -> bool {
 }
 
 impl State {
-    pub fn send_initial_configure(&mut self, toplevel: &ToplevelSurface) {
+    pub fn send_initial_configure(&mut self, window: &Window) {
         let _span = tracy_client::span!("State::send_initial_configure");
+        let toplevel = window.toplevel().unwrap();
 
-        let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) else {
+        let Some(unmapped) = self
+            .niri
+            .unmapped_windows
+            .get_mut(&window.wl_surface().unwrap())
+        else {
             error!("window must be present in unmapped_windows in send_initial_configure()");
             return;
         };
@@ -558,7 +564,7 @@ impl State {
         };
 
         let config = self.niri.config.borrow();
-        let rules = resolve_window_rules(&config.window_rules, toplevel);
+        let rules = resolve_window_rules(&config.window_rules, window);
 
         // Pick the target monitor. First, check if we had an output set in the window rules.
         let mon = rules
@@ -651,17 +657,21 @@ impl State {
         toplevel.send_configure();
     }
 
-    pub fn queue_initial_configure(&self, toplevel: ToplevelSurface) {
+    pub fn queue_initial_configure(&self, window: Window) {
         // Send the initial configure in an idle, in case the client sent some more info after the
         // initial commit.
         self.niri.event_loop.insert_idle(move |state| {
-            if !toplevel.alive() {
+            if !window.alive() {
                 return;
             }
 
-            if let Some(unmapped) = state.niri.unmapped_windows.get(toplevel.wl_surface()) {
+            if let Some(unmapped) = state
+                .niri
+                .unmapped_windows
+                .get(&window.wl_surface().unwrap())
+            {
                 if unmapped.needs_initial_configure() {
-                    state.send_initial_configure(&toplevel);
+                    state.send_initial_configure(&window);
                 }
             }
         });
@@ -773,9 +783,7 @@ impl State {
     pub fn update_reactive_popups(&self, window: &Window, output: &Output) {
         let _span = tracy_client::span!("Niri::update_reactive_popups");
 
-        for (popup, _) in PopupManager::popups_for_surface(
-            window.toplevel().expect("no x11 support").wl_surface(),
-        ) {
+        for (popup, _) in PopupManager::popups_for_surface(&window.wl_surface().unwrap()) {
             match popup {
                 PopupKind::Xdg(ref popup) => {
                     if popup.with_pending_state(|state| state.positioner.reactive) {
@@ -790,10 +798,14 @@ impl State {
         }
     }
 
-    pub fn update_window_rules(&mut self, toplevel: &ToplevelSurface) {
-        let resolve = || resolve_window_rules(&self.niri.config.borrow().window_rules, toplevel);
+    pub fn update_window_rules(&mut self, window: &Window) {
+        let resolve = || resolve_window_rules(&self.niri.config.borrow().window_rules, window);
 
-        if let Some(unmapped) = self.niri.unmapped_windows.get_mut(toplevel.wl_surface()) {
+        if let Some(unmapped) = self
+            .niri
+            .unmapped_windows
+            .get_mut(&window.wl_surface().unwrap())
+        {
             if let InitialConfigureState::Configured { rules, .. } = &mut unmapped.state {
                 *rules = resolve();
             }

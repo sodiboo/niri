@@ -71,6 +71,7 @@
           ];
 
           runtimeDependencies = with pkgs; [
+            xwayland
             wayland
             mesa
             libglvnd # For libEGL

@@ -1,6 +1,7 @@
 mod compositor;
 mod layer_shell;
 mod xdg_shell;
+pub mod xwayland;
 
 use std::fs::File;
 use std::io::Write;
@@ -54,7 +55,8 @@ use smithay::{
     delegate_text_input_manager, delegate_virtual_keyboard_manager,
 };
 
-use crate::niri::{ClientState, State};
+use crate::layout::LayoutElement;
+use crate::niri::{NativeClientState, State};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
@@ -154,6 +156,18 @@ delegate_virtual_keyboard_manager!(State);
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
 
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(xwm) = self.niri.xwm.as_mut() {
+            if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                warn!("failed to set xwayland selection: {err:?}");
+            }
+        }
+    }
     fn send_selection(
         &mut self,
         _ty: SelectionTarget,
@@ -291,7 +305,7 @@ impl SecurityContextHandler for State {
             .event_loop
             .insert_source(source, move |client, _, state| {
                 let config = state.niri.config.borrow();
-                let data = Arc::new(ClientState {
+                let data = Arc::new(NativeClientState {
                     compositor_state: Default::default(),
                     can_view_decoration_globals: config.prefer_no_csd,
                     restricted: true,
@@ -341,20 +355,14 @@ impl ForeignToplevelHandler for State {
 
     fn close(&mut self, wl_surface: WlSurface) {
         if let Some((window, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-            window.toplevel().expect("no x11 support").send_close();
+            window.close();
         }
     }
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>) {
         if let Some((window, current_output)) = self.niri.layout.find_window_and_output(&wl_surface)
         {
-            if !window
-                .toplevel()
-                .expect("no x11 support")
-                .current_state()
-                .capabilities
-                .contains(xdg_toplevel::WmCapabilities::Fullscreen)
-            {
+            if !window.can_fullscreen() {
                 return;
             }
 

@@ -167,6 +167,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spawn_at_startup = mem::take(&mut config.spawn_at_startup);
     *CHILD_ENV.write().unwrap() = mem::take(&mut config.environment);
 
+    let spawn_at_startup = move || {
+        // Spawn commands from cli and auto-start.
+        spawn(cli.command);
+
+        for elem in spawn_at_startup {
+            spawn(elem.command);
+        }
+    };
+
     // Create the compositor.
     let mut event_loop = EventLoop::try_new().unwrap();
     let display = Display::new().unwrap();
@@ -175,6 +184,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_loop.handle(),
         event_loop.get_signal(),
         display,
+        #[cfg(feature = "xwayland")]
+        spawn_at_startup,
     )
     .unwrap();
 
@@ -234,12 +245,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Spawn commands from cli and auto-start.
-    spawn(cli.command);
-
-    for elem in spawn_at_startup {
-        spawn(elem.command);
-    }
+    #[cfg(not(feature = "xwayland"))]
+    spawn_at_startup();
 
     // Show the config error notification right away if needed.
     if config_errored {

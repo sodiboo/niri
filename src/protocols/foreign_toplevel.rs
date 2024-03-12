@@ -12,6 +12,7 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{
     ToplevelStateSet, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
 };
@@ -96,9 +97,11 @@ pub fn refresh(state: &mut State) {
     // the previous window and only then activate the newly focused window.
     let mut focused = None;
     state.niri.layout.with_windows(|window, output| {
-        let wl_surface = window.toplevel().expect("no x11 support").wl_surface();
+        let Some(toplevel) = window.toplevel() else {
+            return;
+        };
 
-        with_states(wl_surface, |states| {
+        with_states(toplevel.wl_surface(), |states| {
             let role = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -106,19 +109,17 @@ pub fn refresh(state: &mut State) {
                 .lock()
                 .unwrap();
 
-            if state.niri.keyboard_focus.as_ref() == Some(wl_surface) {
-                focused = Some((window.clone(), output.cloned()));
+            if state.niri.keyboard_focus.as_ref() == Some(toplevel.wl_surface()) {
+                focused = Some((toplevel.clone(), output.cloned()));
             } else {
-                refresh_toplevel(protocol_state, wl_surface, &role, output, false);
+                refresh_toplevel(protocol_state, toplevel.wl_surface(), &role, output, false);
             }
         });
     });
 
     // Finally, refresh the focused window.
-    if let Some((window, output)) = focused {
-        let wl_surface = window.toplevel().expect("no x11 support").wl_surface();
-
-        with_states(wl_surface, |states| {
+    if let Some((toplevel, output)) = focused {
+        with_states(toplevel.wl_surface(), |states| {
             let role = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -126,7 +127,13 @@ pub fn refresh(state: &mut State) {
                 .lock()
                 .unwrap();
 
-            refresh_toplevel(protocol_state, wl_surface, &role, output.as_ref(), true);
+            refresh_toplevel(
+                protocol_state,
+                toplevel.wl_surface(),
+                &role,
+                output.as_ref(),
+                true,
+            );
         });
     }
 }

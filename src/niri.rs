@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{env, mem, thread};
+use std::{env, iter, mem, thread};
 
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{ensure, Context};
@@ -52,7 +52,7 @@ use smithay::reexports::wayland_server::backend::{
     ClientData, ClientId, DisconnectReason, GlobalId,
 };
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Display, DisplayHandle, Resource};
+use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
 use smithay::utils::{
     ClockSource, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, Transform,
     SERIAL_COUNTER,
@@ -71,6 +71,7 @@ use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerCons
 use smithay::wayland::pointer_gestures::PointerGesturesState;
 use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::security_context::SecurityContextState;
 use smithay::wayland::selection::data_device::{set_data_device_selection, DataDeviceState};
 use smithay::wayland::selection::primary_selection::PrimarySelectionState;
@@ -85,6 +86,7 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::{TabletManagerState, TabletSeatTrait};
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
+use smithay::xwayland::{X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
 
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, RenderResult, Tty, Winit};
@@ -215,6 +217,10 @@ pub struct Niri {
     // Casts are dropped before PipeWire to prevent a double-free (yay).
     pub casts: Vec<Cast>,
     pub pipewire: Option<PipeWire>,
+
+    pub xwayland: XWayland,
+    pub xwm: Option<X11Wm>,
+    pub xdisplay: Option<u32>,
 }
 
 pub struct OutputState {
@@ -325,6 +331,7 @@ impl State {
         event_loop: LoopHandle<'static, State>,
         stop_signal: LoopSignal,
         display: Display<State>,
+        #[cfg(feature = "xwayland")] post_xwayland_init: impl FnOnce() + 'static,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let _span = tracy_client::span!("State::new");
 
@@ -342,7 +349,15 @@ impl State {
             Backend::Tty(tty)
         };
 
-        let mut niri = Niri::new(config.clone(), event_loop, stop_signal, display, &backend);
+        let mut niri = Niri::new(
+            config.clone(),
+            event_loop,
+            stop_signal,
+            display,
+            &backend,
+            #[cfg(feature = "xwayland")]
+            post_xwayland_init,
+        );
         backend.init(&mut niri);
 
         Ok(Self { backend, niri })
@@ -493,12 +508,7 @@ impl State {
                 layer_grab.and_then(move |(s, l)| if l == layer { Some(s.clone()) } else { None })
             };
 
-            let layout_focus = || {
-                self.niri
-                    .layout
-                    .focus()
-                    .map(|win| win.toplevel().expect("no x11 support").wl_surface().clone())
-            };
+            let layout_focus = || self.niri.layout.focus().and_then(|win| win.wl_surface());
             let layer_focus = |surface: &LayerSurface| {
                 surface
                     .can_receive_keyboard_focus()
@@ -833,6 +843,7 @@ impl Niri {
         stop_signal: LoopSignal,
         display: Display<State>,
         backend: &Backend,
+        #[cfg(feature = "xwayland")] post_xwayland_init: impl FnOnce() + 'static,
     ) -> Self {
         let _span = tracy_client::span!("Niri::new");
 
@@ -849,32 +860,22 @@ impl Niri {
             &display_handle,
             [WmCapabilities::Fullscreen],
         );
-        let xdg_decoration_state =
-            XdgDecorationState::new_with_filter::<State, _>(&display_handle, |client| {
-                client
-                    .get_data::<ClientState>()
-                    .unwrap()
-                    .can_view_decoration_globals
-            });
+        let xdg_decoration_state = XdgDecorationState::new_with_filter::<State, _>(
+            &display_handle,
+            ClientState::can_view_decoration_globals,
+        );
         let kde_decoration_state = KdeDecorationState::new_with_filter::<State, _>(
             &display_handle,
             // If we want CSD we will hide the global.
             KdeDecorationsMode::Server,
-            |client| {
-                client
-                    .get_data::<ClientState>()
-                    .unwrap()
-                    .can_view_decoration_globals
-            },
+            ClientState::can_view_decoration_globals,
         );
-        let layer_shell_state =
-            WlrLayerShellState::new_with_filter::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
+        let layer_shell_state = WlrLayerShellState::new_with_filter::<State, _>(
+            &display_handle,
+            ClientState::unrestricted,
+        );
         let session_lock_state =
-            SessionLockManagerState::new::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
+            SessionLockManagerState::new::<State, _>(&display_handle, ClientState::unrestricted);
         let shm_state = ShmState::new::<State>(&display_handle, vec![]);
         let output_manager_state =
             OutputManagerState::new_with_xdg_output::<State>(&display_handle);
@@ -891,32 +892,27 @@ impl Niri {
         let data_control_state = DataControlState::new::<State, _>(
             &display_handle,
             Some(&primary_selection_state),
-            |client| !client.get_data::<ClientState>().unwrap().restricted,
+            ClientState::unrestricted,
         );
         let presentation_state =
             PresentationState::new::<State>(&display_handle, Monotonic::ID as u32);
         let security_context_state =
-            SecurityContextState::new::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
+            SecurityContextState::new::<State, _>(&display_handle, ClientState::unrestricted);
 
         let text_input_state = TextInputManagerState::new::<State>(&display_handle);
         let input_method_state =
-            InputMethodManagerState::new::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
-        let virtual_keyboard_state =
-            VirtualKeyboardManagerState::new::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
+            InputMethodManagerState::new::<State, _>(&display_handle, ClientState::unrestricted);
+        let virtual_keyboard_state = VirtualKeyboardManagerState::new::<State, _>(
+            &display_handle,
+            ClientState::unrestricted,
+        );
 
-        let foreign_toplevel_state =
-            ForeignToplevelManagerState::new::<State, _>(&display_handle, |client| {
-                !client.get_data::<ClientState>().unwrap().restricted
-            });
-        let screencopy_state = ScreencopyManagerState::new::<State, _>(&display_handle, |client| {
-            !client.get_data::<ClientState>().unwrap().restricted
-        });
+        let foreign_toplevel_state = ForeignToplevelManagerState::new::<State, _>(
+            &display_handle,
+            ClientState::unrestricted,
+        );
+        let screencopy_state =
+            ScreencopyManagerState::new::<State, _>(&display_handle, ClientState::unrestricted);
 
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         seat.add_keyboard(
@@ -969,7 +965,7 @@ impl Niri {
         event_loop
             .insert_source(socket_source, move |client, _, state| {
                 let config = state.niri.config.borrow();
-                let data = Arc::new(ClientState {
+                let data = Arc::new(NativeClientState {
                     compositor_state: Default::default(),
                     can_view_decoration_globals: config.prefer_no_csd,
                     restricted: false,
@@ -1007,6 +1003,61 @@ impl Niri {
                 Ok(PostAction::Continue)
             })
             .unwrap();
+
+        let xwayland = {
+            let (xwayland, source) = XWayland::new(&display_handle);
+            info!("inserting xwayland source");
+
+            let mut post_xwayland_init = Some(post_xwayland_init);
+            event_loop
+                .insert_source(source, move |event, _, state| {
+                    match event {
+                        XWaylandEvent::Ready {
+                            connection,
+                            client,
+                            client_fd: _,
+                            display: xdisplay,
+                        } => {
+                            env::set_var("DISPLAY", format!(":{xdisplay}"));
+                            info!("Xwayland is listening on `:{xdisplay}`");
+
+                            let wm = X11Wm::start_wm(
+                                state.niri.event_loop.clone(),
+                                state.niri.display_handle.clone(),
+                                connection,
+                                client,
+                            )
+                            .expect("failed to start X11 WM");
+                            // TODO: x11 cursor themes
+
+                            state.niri.xwm = Some(wm);
+                            state.niri.xdisplay = Some(xdisplay);
+
+                            if let Some(post_xwayland_init) = post_xwayland_init.take() {
+                                post_xwayland_init();
+                            }
+                        }
+                        XWaylandEvent::Exited => {
+                            env::remove_var("DISPLAY");
+                            info!("Xwayland exited");
+                            let _ = state.niri.xwm.take();
+                            let _ = state.niri.xdisplay.take();
+                        }
+                    }
+                })
+                .expect("failed to insert XWayland source into event loop");
+
+            xwayland
+                .start(
+                    event_loop.clone(),
+                    None,
+                    iter::empty::<(OsString, OsString)>(),
+                    true,
+                    |_| {},
+                )
+                .unwrap();
+            xwayland
+        };
 
         drop(config_);
         Self {
@@ -1088,6 +1139,10 @@ impl Niri {
 
             pipewire,
             casts: vec![],
+
+            xwayland,
+            xwm: None,
+            xdisplay: None,
         }
     }
 
@@ -3044,16 +3099,60 @@ impl Niri {
     }
 }
 
-pub struct ClientState {
+pub struct NativeClientState {
     pub compositor_state: CompositorClientState,
     pub can_view_decoration_globals: bool,
     /// Whether this client is denied from the restricted protocols such as security-context.
     pub restricted: bool,
 }
 
-impl ClientData for ClientState {
+impl ClientData for NativeClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}
+
+pub trait ClientState {
+    fn compositor_state(&self) -> &CompositorClientState;
+    fn can_view_decoration_globals(&self) -> bool;
+    fn restricted(&self) -> bool;
+    fn unrestricted(&self) -> bool {
+        !self.restricted()
+    }
+    fn is_xwayland(&self) -> bool;
+}
+
+fn map_state<'a, T>(
+    client: &'a Client,
+    native: impl FnOnce(&'a NativeClientState) -> T,
+    xwayland: impl FnOnce(&'a XWaylandClientData) -> T,
+) -> T {
+    client
+        .get_data::<NativeClientState>()
+        .map(native)
+        .or_else(|| client.get_data::<XWaylandClientData>().map(xwayland))
+        .expect("missing client state")
+}
+
+impl ClientState for Client {
+    fn compositor_state(&self) -> &CompositorClientState {
+        map_state(
+            self,
+            |state| &state.compositor_state,
+            |xwayland_data| &xwayland_data.compositor_state,
+        )
+    }
+
+    fn can_view_decoration_globals(&self) -> bool {
+        map_state(self, |state| state.can_view_decoration_globals, |_| true)
+    }
+
+    fn restricted(&self) -> bool {
+        map_state(self, |state| state.restricted, |_| false)
+    }
+
+    fn is_xwayland(&self) -> bool {
+        self.get_data::<XWaylandClientData>().is_some()
+    }
 }
 
 niri_render_elements! {

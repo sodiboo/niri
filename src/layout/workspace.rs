@@ -6,7 +6,7 @@ use std::time::Duration;
 use niri_config::{CenterFocusedColumn, PresetWidth, Struts};
 use niri_ipc::SizeChange;
 use smithay::desktop::space::SpaceElement;
-use smithay::desktop::{layer_map_for_output, Window};
+use smithay::desktop::{layer_map_for_output, Window, WindowSurface};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -377,18 +377,32 @@ impl<W: LayoutElement> Workspace<W> {
             set_preferred_scale_transform(window, output);
         }
 
-        window
-            .toplevel()
-            .expect("no x11 support")
-            .with_pending_state(|state| {
-                if state.states.contains(xdg_toplevel::State::Fullscreen) {
-                    state.size = Some(self.view_size);
-                } else {
-                    state.size = Some(self.new_window_size(width));
-                }
+        match window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => {
+                toplevel.with_pending_state(|state| {
+                    if state.states.contains(xdg_toplevel::State::Fullscreen) {
+                        state.size = Some(self.view_size);
+                    } else {
+                        state.size = Some(self.new_window_size(width));
+                    }
 
-                state.bounds = Some(self.toplevel_bounds());
-            });
+                    state.bounds = Some(self.toplevel_bounds());
+                });
+            }
+            WindowSurface::X11(surface) => {
+                surface
+                    .configure(Rectangle::from_loc_and_size(
+                        (0, 0),
+                        if surface.is_fullscreen() {
+                            self.view_size
+                        } else {
+                            self.new_window_size(width)
+                        },
+                    ))
+                    .unwrap()
+                // TODO: x11 bounds
+            }
+        }
     }
 
     fn compute_new_view_offset_for_column(&self, current_x: i32, idx: usize) -> i32 {
@@ -1447,15 +1461,14 @@ impl Workspace<Window> {
                     && col.active_tile_idx == tile_idx;
                 win.set_activated(active);
 
-                win.toplevel()
-                    .expect("no x11 support")
-                    .with_pending_state(|state| {
+                // TODO: x11 bounds
+                if let Some(toplevel) = win.toplevel() {
+                    toplevel.with_pending_state(|state| {
                         state.bounds = Some(bounds);
                     });
+                    toplevel.send_pending_configure();
+                }
 
-                win.toplevel()
-                    .expect("no x11 support")
-                    .send_pending_configure();
                 win.refresh();
             }
         }

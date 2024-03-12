@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
+use smithay::desktop::WindowSurface;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::reexports::calloop::Interest;
 use smithay::reexports::wayland_server::protocol::wl_buffer;
@@ -13,6 +14,7 @@ use smithay::wayland::compositor::{
     SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{delegate_compositor, delegate_shm};
 
@@ -26,7 +28,7 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        client.compositor_state()
     }
 
     fn new_subsurface(&mut self, surface: &WlSurface, parent: &WlSurface) {
@@ -127,10 +129,7 @@ impl CompositorHandler for State {
                             (None, false, None)
                         };
 
-                    let parent = window
-                        .toplevel()
-                        .expect("no x11 support")
-                        .parent()
+                    let parent = get_parent(&window.wl_surface().unwrap())
                         .and_then(|parent| self.niri.layout.find_window_and_output(&parent))
                         // Only consider the parent if we configured the window for the same
                         // output.
@@ -169,8 +168,8 @@ impl CompositorHandler for State {
                 // The toplevel remains unmapped.
                 let unmapped = entry.get();
                 if unmapped.needs_initial_configure() {
-                    let toplevel = unmapped.window.toplevel().expect("no x11 support").clone();
-                    self.queue_initial_configure(toplevel);
+                    let window = unmapped.window.clone();
+                    self.queue_initial_configure(window);
                 }
                 return;
             }

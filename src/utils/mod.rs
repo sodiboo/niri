@@ -22,7 +22,6 @@ pub static IS_SYSTEMD_SERVICE: AtomicBool = AtomicBool::new(false);
 pub fn clone2<T: Clone, U: Clone>(t: (&T, &U)) -> (T, U) {
     (t.0.clone(), t.1.clone())
 }
-
 pub fn version() -> String {
     format!(
         "{} ({})",

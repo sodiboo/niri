@@ -98,7 +98,8 @@ proptest-derive = "0.4.0"
 xshell = "0.2.5"
 
 [features]
-default = ["dbus", "systemd", "xdp-gnome-screencast"]
+default = ["dbus", "systemd", "xdp-gnome-screencast", "xwayland"]
+xwayland = ["smithay/xwayland"]
 # Enables D-Bus support (serve various freedesktop and GNOME interfaces, power button handling).
 dbus = ["zbus", "async-channel", "async-io", "notify-rust", "url"]
 # Enables systemd integration (global environment, apps in transient scopes).
