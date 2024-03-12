@@ -39,7 +39,7 @@ use smithay::desktop::{
 use smithay::input::keyboard::{Layout as KeyboardLayout, XkbContextHandler};
 use smithay::input::pointer::{CursorIcon, CursorImageAttributes, CursorImageStatus, MotionEvent};
 use smithay::input::{Seat, SeatState};
-use smithay::output::{self, Output};
+use smithay::output::{self, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{
@@ -86,6 +86,7 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::{TabletManagerState, TabletSeatTrait};
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
+use smithay::wayland::xdg_foreign::XdgForeignState;
 use smithay::xwayland::{X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
 
 use crate::backend::tty::SurfaceDmabufFeedback;
@@ -118,6 +119,11 @@ use crate::{animation, niri_render_elements};
 
 const CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.2, 1.];
 const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
+
+// We'll try to send frame callbacks at least once a second. We'll make a timer that fires once a
+// second, so with the worst timing the maximum interval between two frame callbacks for a surface
+// should be ~1.995 seconds.
+const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
 
 pub struct Niri {
     pub config: Rc<RefCell<Config>>,
@@ -160,6 +166,7 @@ pub struct Niri {
     pub session_lock_state: SessionLockManagerState,
     pub foreign_toplevel_state: ForeignToplevelManagerState,
     pub screencopy_state: ScreencopyManagerState,
+    pub xdg_foreign_state: XdgForeignState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
     pub dmabuf_state: DmabufState,
@@ -387,7 +394,7 @@ impl State {
         let under = self.niri.surface_under_and_global_space(location);
         self.niri
             .maybe_activate_pointer_constraint(location, &under);
-        self.niri.pointer_focus = under.clone();
+        self.niri.pointer_focus.clone_from(&under);
         let under = under.map(|u| u.surface);
 
         let pointer = &self.niri.seat.get_pointer().unwrap();
@@ -446,7 +453,7 @@ impl State {
         self.niri
             .maybe_activate_pointer_constraint(location, &under);
 
-        self.niri.pointer_focus = under.clone();
+        self.niri.pointer_focus.clone_from(&under);
         let under = under.map(|u| u.surface);
 
         pointer.motion(
@@ -596,7 +603,7 @@ impl State {
                 }
             }
 
-            self.niri.keyboard_focus = focus.clone();
+            self.niri.keyboard_focus.clone_from(&focus);
             keyboard.set_focus(self, focus, SERIAL_COUNTER.next_serial());
 
             // FIXME: can be more granular.
@@ -728,9 +735,9 @@ impl State {
                 self.niri.output_resized(output);
             }
 
-            self.niri.reposition_outputs(None);
-
             self.backend.on_output_config_changed(&mut self.niri);
+
+            self.niri.reposition_outputs(None);
 
             if let Some(touch) = self.niri.seat.get_touch() {
                 touch.cancel(self);
@@ -913,6 +920,7 @@ impl Niri {
         );
         let screencopy_state =
             ScreencopyManagerState::new::<State, _>(&display_handle, ClientState::unrestricted);
+        let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
 
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         seat.add_keyboard(
@@ -959,6 +967,16 @@ impl Niri {
                 None
             }
         };
+
+        event_loop
+            .insert_source(
+                Timer::from_duration(Duration::from_secs(1)),
+                |_, _, state| {
+                    state.niri.send_frame_callbacks_on_fallback_timer();
+                    TimeoutAction::ToDuration(Duration::from_secs(1))
+                },
+            )
+            .unwrap();
 
         let socket_source = ListeningSocketSource::new_auto().unwrap();
         let socket_name = socket_source.socket_name().to_os_string();
@@ -1089,6 +1107,7 @@ impl Niri {
             session_lock_state,
             foreign_toplevel_state,
             screencopy_state,
+            xdg_foreign_state,
             text_input_state,
             input_method_state,
             virtual_keyboard_state,
@@ -2229,9 +2248,9 @@ impl Niri {
         // to err on the safe side.
         self.send_frame_callbacks(output);
 
+        #[cfg(feature = "xdp-gnome-screencast")]
         backend.with_primary_renderer(|renderer| {
             // Render and send to PipeWire screencast streams.
-            #[cfg(feature = "xdp-gnome-screencast")]
             self.render_for_screen_cast(renderer, output, target_presentation_time);
         });
     }
@@ -2481,11 +2500,21 @@ impl Niri {
         let frame_callback_time = get_monotonic_time();
 
         for win in self.layout.windows_for_output(output) {
-            win.send_frame(output, frame_callback_time, None, should_send);
+            win.send_frame(
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                should_send,
+            );
         }
 
         for surface in layer_map_for_output(output).layers() {
-            surface.send_frame(output, frame_callback_time, None, should_send);
+            surface.send_frame(
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                should_send,
+            );
         }
 
         if let Some(surface) = &self.output_state[output].lock_surface {
@@ -2493,17 +2522,97 @@ impl Niri {
                 surface.wl_surface(),
                 output,
                 frame_callback_time,
-                None,
+                FRAME_CALLBACK_THROTTLE,
                 should_send,
             );
         }
 
         if let Some(surface) = &self.dnd_icon {
-            send_frames_surface_tree(surface, output, frame_callback_time, None, should_send);
+            send_frames_surface_tree(
+                surface,
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                should_send,
+            );
         }
 
         if let CursorImageStatus::Surface(surface) = self.cursor_manager.cursor_image() {
-            send_frames_surface_tree(surface, output, frame_callback_time, None, should_send);
+            send_frames_surface_tree(
+                surface,
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                should_send,
+            );
+        }
+    }
+
+    pub fn send_frame_callbacks_on_fallback_timer(&self) {
+        let _span = tracy_client::span!("Niri::send_frame_callbacks_on_fallback_timer");
+
+        // Make up a bogus output; we don't care about it here anyway, just the throttling timer.
+        let output = Output::new(
+            String::new(),
+            PhysicalProperties {
+                size: Size::from((0, 0)),
+                subpixel: Subpixel::Unknown,
+                make: String::new(),
+                model: String::new(),
+            },
+        );
+        let output = &output;
+
+        let frame_callback_time = get_monotonic_time();
+
+        self.layout.with_windows(|win, _| {
+            win.send_frame(
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                |_, _| None,
+            );
+        });
+
+        for (output, state) in self.output_state.iter() {
+            for surface in layer_map_for_output(output).layers() {
+                surface.send_frame(
+                    output,
+                    frame_callback_time,
+                    FRAME_CALLBACK_THROTTLE,
+                    |_, _| None,
+                );
+            }
+
+            if let Some(surface) = &state.lock_surface {
+                send_frames_surface_tree(
+                    surface.wl_surface(),
+                    output,
+                    frame_callback_time,
+                    FRAME_CALLBACK_THROTTLE,
+                    |_, _| None,
+                );
+            }
+        }
+
+        if let Some(surface) = &self.dnd_icon {
+            send_frames_surface_tree(
+                surface,
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                |_, _| None,
+            );
+        }
+
+        if let CursorImageStatus::Surface(surface) = self.cursor_manager.cursor_image() {
+            send_frames_surface_tree(
+                surface,
+                output,
+                frame_callback_time,
+                FRAME_CALLBACK_THROTTLE,
+                |_, _| None,
+            );
         }
     }
 
