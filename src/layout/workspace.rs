@@ -376,6 +376,13 @@ impl<W: LayoutElement> Workspace<W> {
         Size::from((width, max(height, 1)))
     }
 
+    pub fn abs_position(&self, window: &W) -> Option<Point<i32, Logical>> {
+        self.columns
+            .iter()
+            .position(|c| c.contains(window))
+            .map(|idx| (self.visual_column_x(idx), 0).into())
+    }
+
     pub fn configure_new_window(&self, window: &Window, width: Option<ColumnWidth>) {
         if let Some(output) = self.output.as_ref() {
             set_preferred_scale_transform(window, output);
@@ -597,11 +604,14 @@ impl<W: LayoutElement> Workspace<W> {
         width: ColumnWidth,
         is_full_width: bool,
     ) {
+        let activate = activate && !window.is_override_redirect();
         self.enter_output_for_window(&window);
 
         let was_empty = self.columns.is_empty();
 
-        let idx = if self.columns.is_empty() {
+        let idx = if window.is_override_redirect() {
+            self.columns.len()
+        } else if self.columns.is_empty() {
             0
         } else {
             self.active_column_idx + 1
@@ -1277,6 +1287,7 @@ impl<W: LayoutElement> Workspace<W> {
         let mut first = true;
 
         for (tile, tile_pos) in self.tiles_in_render_order() {
+            tile.request_tile_loc(tile_pos);
             // For the active tile (which comes first), draw the focus ring.
             let focus_ring = first;
             first = false;

@@ -7,7 +7,7 @@ use smithay::desktop::space::SpaceElement;
 use smithay::desktop::{Window, WindowSurface};
 use smithay::input::pointer::Focus;
 use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER};
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::selection::data_device::{
     clear_data_device_selection, current_data_device_selection_userdata,
     request_data_device_client_selection, set_data_device_selection,
@@ -61,9 +61,24 @@ impl XwmHandler for State {
         );
         debug!("with geometry {:?}", window.geometry());
         let wl_surface = window.wl_surface().unwrap();
+        if window.is_override_redirect() {
+            debug!("and is override-redirect");
+            if get_parent(&wl_surface).is_some() {
+                debug!("and has parent");
+            } else {
+                debug!("and without parent");
+            }
+            debug!("and transient for {:?}", window.is_transient_for());
+            debug!("and mapped to {:?}", window.mapped_window_id());
+            debug!("is popup: {}", window.is_popup());
+
+            self.niri.override_redirect.push(window.clone());
+            self.niri.queue_redraw_all();
+
+            // return;
+        }
         let unmapped = Unmapped::new(Window::new_x11_window(window));
         let existing = self.niri.unmapped_windows.insert(wl_surface, unmapped);
-
         assert!(existing.is_none());
     }
 
@@ -75,10 +90,6 @@ impl XwmHandler for State {
             window.class()
         );
         debug!("with geometry {:?}", window.geometry());
-        debug!(
-            "this window is transient for {:?}",
-            window.is_transient_for()
-        );
         // let location = window.geometry().loc;
         // let window = WindowElement(Window::new_x11_window(window));
         // self.state.space.map_element(window, location, true);
@@ -91,6 +102,17 @@ impl XwmHandler for State {
             window.title(),
             window.class()
         );
+        if window.is_override_redirect() {
+            if let Some(index) = self
+                .niri
+                .override_redirect
+                .iter()
+                .position(|w| w == &window)
+            {
+                self.niri.override_redirect.remove(index);
+                self.niri.queue_redraw_all();
+            }
+        }
         let Some(surface) = window.wl_surface() else {
             error!("unmapped_window without wl_surface");
             return;
@@ -135,16 +157,10 @@ impl XwmHandler for State {
     fn configure_notify(
         &mut self,
         _xwm: XwmId,
-        window: X11Surface,
-        geometry: Rectangle<i32, Logical>,
+        _window: X11Surface,
+        _geometry: Rectangle<i32, Logical>,
         _above: Option<u32>,
     ) {
-        debug!(
-            "configure_notify {}, {:?}, #{}",
-            window.window_id(),
-            window.title(),
-            window.class()
-        );
         // let Some(elem) = self
         //     .state
         //     .space

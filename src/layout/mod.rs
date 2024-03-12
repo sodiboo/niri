@@ -99,11 +99,12 @@ pub trait LayoutElement: PartialEq {
         scale: Scale<f64>,
     ) -> Vec<LayoutElementRenderElement<R>>;
 
-    fn request_size(&self, size: Size<i32, Logical>);
+    fn request_configure(&self, rect: Rectangle<i32, Logical>);
     fn request_fullscreen(&self, size: Size<i32, Logical>);
     fn min_size(&self) -> Size<i32, Logical>;
     fn max_size(&self) -> Size<i32, Logical>;
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool;
+    fn is_override_redirect(&self) -> bool;
     fn has_ssd(&self) -> bool;
     fn set_preferred_scale_transform(&self, scale: i32, transform: Transform);
     fn output_enter(&self, output: &Output);
@@ -250,17 +251,19 @@ impl LayoutElement for Window {
         )
     }
 
-    fn request_size(&self, size: Size<i32, Logical>) {
+    fn request_configure(&self, rect: Rectangle<i32, Logical>) {
         match self.underlying_surface() {
             WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Fullscreen);
-                state.size = Some(size);
+                state.size = Some(rect.size);
             }),
             WindowSurface::X11(surface) => {
+                if surface.geometry().loc != rect.loc {
+                    debug!("configure {:?} #{:?}", surface.title(), surface.class());
+                    debug!("with new loc {:?}", rect.loc)
+                }
                 surface.set_fullscreen(false).xunwrap();
-                surface
-                    .configure(Rectangle::from_loc_and_size((0, 0), size))
-                    .xunwrap();
+                surface.configure(rect).xunwrap();
             }
         }
     }
@@ -300,6 +303,11 @@ impl LayoutElement for Window {
 
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool {
         self.wl_surface().as_ref() == Some(wl_surface)
+    }
+
+    fn is_override_redirect(&self) -> bool {
+        self.x11_surface()
+            .map_or(false, |surface| surface.is_override_redirect())
     }
 
     fn set_preferred_scale_transform(&self, scale: i32, transform: Transform) {
@@ -1925,8 +1933,8 @@ mod tests {
             vec![]
         }
 
-        fn request_size(&self, size: Size<i32, Logical>) {
-            self.0.requested_size.set(Some(size));
+        fn request_configure(&self, rect: Rectangle<i32, Logical>) {
+            self.0.requested_size.set(Some(rect.size));
             self.0.pending_fullscreen.set(false);
         }
 
@@ -1943,6 +1951,10 @@ mod tests {
         }
 
         fn is_wl_surface(&self, _wl_surface: &WlSurface) -> bool {
+            false
+        }
+
+        fn is_override_redirect(&self) -> bool {
             false
         }
 

@@ -87,7 +87,7 @@ use smithay::wayland::tablet_manager::{TabletManagerState, TabletSeatTrait};
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
-use smithay::xwayland::{X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
+use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
 
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, RenderResult, Tty, Winit};
@@ -228,6 +228,7 @@ pub struct Niri {
     pub xwayland: XWayland,
     pub xwm: Option<X11Wm>,
     pub xdisplay: Option<u32>,
+    pub override_redirect: Vec<X11Surface>,
 }
 
 pub struct OutputState {
@@ -1162,6 +1163,7 @@ impl Niri {
             xwayland,
             xwm: None,
             xdisplay: None,
+            override_redirect: vec![],
         }
     }
 
@@ -2094,6 +2096,18 @@ impl Niri {
         if let Some(element) = self.hotkey_overlay.render(renderer, output) {
             elements.push(element.into());
         }
+
+        elements.extend(self.override_redirect.iter().flat_map(|surface| {
+            surface.render_elements(
+                renderer,
+                surface
+                    .geometry()
+                    .loc
+                    .to_physical_precise_round(output_scale),
+                output_scale,
+                1.,
+            )
+        }));
 
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();

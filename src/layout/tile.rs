@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::max;
 use std::rc::Rc;
 use std::time::Duration;
@@ -46,6 +47,8 @@ pub struct Tile<W: LayoutElement> {
 
     /// Configurable properties of the layout.
     options: Rc<Options>,
+
+    latest_loc: Rc<RefCell<Point<i32, Logical>>>,
 }
 
 niri_render_elements! {
@@ -68,6 +71,7 @@ impl<W: LayoutElement> Tile<W> {
             fullscreen_size: Default::default(),
             open_animation: None,
             options,
+            latest_loc: Rc::new(RefCell::new(Point::from((0, 0)))),
         }
     }
 
@@ -221,7 +225,16 @@ impl<W: LayoutElement> Tile<W> {
         activation_region.to_f64().contains(point)
     }
 
-    pub fn request_tile_size(&mut self, mut size: Size<i32, Logical>) {
+    pub fn request_tile_loc(&self, loc: Point<i32, Logical>) {
+        if *self.latest_loc.borrow() == loc {
+            return;
+        }
+        *self.latest_loc.borrow_mut() = loc;
+
+        self.request_tile_size(self.tile_size());
+    }
+
+    pub fn request_tile_size(&self, mut size: Size<i32, Logical>) {
         // Can't go through effective_border_width() because we might be fullscreen.
         if !self.border.is_off() {
             let width = self.border.width();
@@ -229,7 +242,10 @@ impl<W: LayoutElement> Tile<W> {
             size.h = max(1, size.h - width * 2);
         }
 
-        self.window.request_size(size);
+        self.window.request_configure(Rectangle::from_loc_and_size(
+            *self.latest_loc.borrow(),
+            size,
+        ));
     }
 
     pub fn tile_width_for_window_width(&self, size: i32) -> i32 {
