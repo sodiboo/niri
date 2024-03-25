@@ -28,7 +28,7 @@ When a monitor disconnects, its workspaces will move to another monitor, but upo
 - Dynamic workspaces like in GNOME
 - Built-in screenshot UI
 - Monitor screencasting through xdg-desktop-portal-gnome
-- Touchpad gestures
+- [Touchpad gestures](https://github.com/YaLTeR/niri/assets/1794388/946a910e-9bec-4cd1-a923-4a9421707515)
 - Configurable layout: gaps, borders, struts, window sizes
 - Live-reloading config
 
@@ -146,6 +146,14 @@ For example, `niri msg --json outputs`.
 For programmatic access, check the [niri-ipc sub-crate](./niri-ipc/) which defines the types.
 The communication over the IPC socket happens in JSON.
 
+## Configuration
+
+Niri will load configuration from `$XDG_CONFIG_HOME/.config/niri/config.kdl` or `~/.config/niri/config.kdl`.
+If this fails, it will load [the default configuration file](resources/default-config.kdl).
+Please use the default configuration file as the starting point for your custom configuration.
+
+Niri will live-reload most of the configuration settings, like key binds or gaps or output modes, as you change the config file.
+
 ## Default Hotkeys
 
 When running on a TTY, the Mod key is <kbd>Super</kbd>.
@@ -194,14 +202,6 @@ The general system is: if a hotkey switches somewhere, then adding <kbd>Ctrl</kb
 | <kbd>Alt</kbd><kbd>PrtSc</kbd> | Take a screenshot of the focused window to clipboard and to `~/Pictures/Screenshots/` |
 | <kbd>Ctrl</kbd><kbd>PrtSc</kbd> | Take a screenshot of the focused monitor to clipboard and to `~/Pictures/Screenshots/` |
 | <kbd>Mod</kbd><kbd>Shift</kbd><kbd>E</kbd> | Exit niri |
-
-## Configuration
-
-Niri will load configuration from `$XDG_CONFIG_HOME/.config/niri/config.kdl` or `~/.config/niri/config.kdl`.
-If this fails, it will load [the default configuration file](resources/default-config.kdl).
-Please use the default configuration file as the starting point for your custom configuration.
-
-Niri will live-reload most of the configuration settings, like key binds or gaps or output modes, as you change the config file.
 
 ## Contact
 

@@ -51,7 +51,7 @@ use smithay::{
     delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
     delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
     delegate_security_context, delegate_session_lock, delegate_tablet_manager,
-    delegate_text_input_manager, delegate_virtual_keyboard_manager,
+    delegate_text_input_manager, delegate_viewporter, delegate_virtual_keyboard_manager,
 };
 
 use crate::layout::LayoutElement;
@@ -59,9 +59,10 @@ use crate::niri::{NativeClientState, State};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
+use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
 use crate::protocols::screencopy::{Screencopy, ScreencopyHandler};
 use crate::utils::output_size;
-use crate::{delegate_foreign_toplevel, delegate_screencopy};
+use crate::{delegate_foreign_toplevel, delegate_gamma_control, delegate_screencopy};
 
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
@@ -144,7 +145,7 @@ impl InputMethodHandler for State {
         self.niri
             .layout
             .find_window_and_output(parent)
-            .map(|(window, _)| window.geometry())
+            .map(|(mapped, _)| mapped.window.geometry())
             .unwrap_or_default()
     }
 }
@@ -345,33 +346,33 @@ impl ForeignToplevelHandler for State {
     }
 
     fn activate(&mut self, wl_surface: WlSurface) {
-        if let Some((window, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-            let window = window.clone();
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+            let window = mapped.window.clone();
             self.niri.layout.activate_window(&window);
             self.niri.queue_redraw_all();
         }
     }
 
     fn close(&mut self, wl_surface: WlSurface) {
-        if let Some((window, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-            window.close();
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+            mapped.close();
         }
     }
 
     fn set_fullscreen(&mut self, wl_surface: WlSurface, wl_output: Option<WlOutput>) {
-        if let Some((window, current_output)) = self.niri.layout.find_window_and_output(&wl_surface)
+        if let Some((mapped, current_output)) = self.niri.layout.find_window_and_output(&wl_surface)
         {
             if !window.can_fullscreen() {
                 return;
             }
 
-            let window = window.clone();
+            let window = mapped.window.clone();
 
             if let Some(requested_output) = wl_output.as_ref().and_then(Output::from_resource) {
                 if &requested_output != current_output {
                     self.niri
                         .layout
-                        .move_window_to_output(window.clone(), &requested_output);
+                        .move_window_to_output(&window, &requested_output);
                 }
             }
 
@@ -380,8 +381,8 @@ impl ForeignToplevelHandler for State {
     }
 
     fn unset_fullscreen(&mut self, wl_surface: WlSurface) {
-        if let Some((window, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
-            let window = window.clone();
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+            let window = mapped.window.clone();
             self.niri.layout.set_fullscreen(&window, false);
         }
     }
@@ -445,3 +446,35 @@ impl DrmLeaseHandler for State {
     }
 }
 delegate_drm_lease!(State);
+
+delegate_viewporter!(State);
+
+impl GammaControlHandler for State {
+    fn gamma_control_manager_state(&mut self) -> &mut GammaControlManagerState {
+        &mut self.niri.gamma_control_manager_state
+    }
+
+    fn get_gamma_size(&mut self, output: &Output) -> Option<u32> {
+        match self.backend.tty().get_gamma_size(output) {
+            Ok(size) => Some(size),
+            Err(err) => {
+                warn!(
+                    "error getting gamma size for output {}: {err:?}",
+                    output.name()
+                );
+                None
+            }
+        }
+    }
+
+    fn set_gamma(&mut self, output: &Output, ramp: Option<Vec<u16>>) -> Option<()> {
+        match self.backend.tty().set_gamma(output, ramp) {
+            Ok(()) => Some(()),
+            Err(err) => {
+                warn!("error setting gamma for output {}: {err:?}", output.name());
+                None
+            }
+        }
+    }
+}
+delegate_gamma_control!(State);

@@ -33,6 +33,7 @@ input {
         // accel-speed 0.2
         // accel-profile "flat"
         // tap-button-map "left-middle-right"
+        // click-method "clickfinger"
     }
 
     mouse {
@@ -66,6 +67,17 @@ input {
     // Uncomment this if you would like to configure the power button elsewhere
     // (i.e. logind.conf).
     // disable-power-key-handling
+
+    // Uncomment this to make the mouse warp to the center of newly focused windows.
+    // warp-mouse-to-focus
+
+    // Focus windows and outputs automatically when moving the mouse into them.
+    // focus-follows-mouse
+
+    // Uncomment this to enable workspace auto-back-and-forth.
+    // If enabled, switching to the same workspace by index twice will switch back to the
+    // previous workspace.
+    // workspace-auto-back-and-forth
 }
 
 // You can configure outputs by their name, which you can find
@@ -111,6 +123,9 @@ layout {
     // If you don't like that, you should uncomment `prefer-no-csd` below.
     // Niri will draw focus ring and border *around* windows that agree to omit their
     // client-side decorations.
+    //
+    // Alternatively, you can override it with a window rule called
+    // `draw-border-with-background`.
 
     // You can change how the focus ring looks.
     focus-ring {
@@ -350,6 +365,8 @@ animations {
     exclude app-id=r#"\.unwanted\."#
 
     // Here are the properties that you can set on a window rule.
+    // These properties apply once, when a window first opens.
+
     // You can override the default column width.
     default-column-width { proportion 0.75; }
 
@@ -365,6 +382,27 @@ animations {
     open-fullscreen true
     // You can also set this to false to prevent a window from opening fullscreen.
     // open-fullscreen false
+
+    // The following properties apply dynamically while a window is open.
+
+    // You can amend the window's minimum and maximum size in logical pixels.
+    // Keep in mind that the window itself always has a final say in its size.
+    // These values instruct niri to never ask the window to be smaller than
+    // the minimum you set, or to be bigger than the maximum you set.
+    min-width 100
+    max-width 200
+    min-height 300
+    // Caveat: max-height will only apply to automatically-sized windows
+    // if it is equal to min-height. Either set this equal to min-height,
+    // or change the window height manually for this to apply.
+    max-height 300
+
+    // Override whether the border and the focus ring draw with a background.
+    // Set this to `true` to draw them as solid colored rectangles even for
+    // windows which agreed to omit their client-side decorations.
+    // Set this to `false` to draw them as borders around the window even for
+    // windows which use client-side decorations.
+    draw-border-with-background false
 }
 
 // Here's a useful example. Work around WezTerm's initial configure bug
@@ -481,6 +519,27 @@ binds {
     Mod+Shift+U         { move-workspace-down; }
     Mod+Shift+I         { move-workspace-up; }
 
+    // You can bind mouse wheel scroll ticks using the following syntax.
+    // To avoid scrolling through workspaces really fast, you can use
+    // the cooldown-ms property. The bind will be rate-limited to this value.
+    // You can set a cooldown on any bind, but it's most useful for the wheel.
+    Mod+WheelDown      cooldown-ms=150 { focus-workspace-down; }
+    Mod+WheelUp        cooldown-ms=150 { focus-workspace-up; }
+    Mod+Ctrl+WheelDown cooldown-ms=150 { move-column-to-workspace-down; }
+    Mod+Ctrl+WheelUp   cooldown-ms=150 { move-column-to-workspace-up; }
+
+    Mod+WheelRight      { focus-column-right; }
+    Mod+WheelLeft       { focus-column-left; }
+    Mod+Ctrl+WheelRight { move-column-right; }
+    Mod+Ctrl+WheelLeft  { move-column-left; }
+
+    // Usually scrolling up and down with Shift in applications results in
+    // horizontal scrolling; these binds replicate that.
+    Mod+Shift+WheelDown      { focus-column-right; }
+    Mod+Shift+WheelUp        { focus-column-left; }
+    Mod+Ctrl+Shift+WheelDown { move-column-right; }
+    Mod+Ctrl+Shift+WheelUp   { move-column-left; }
+
     // You can refer to workspaces by index. However, keep in mind that
     // niri is a dynamic workspace system, so these commands are kind of
     // "best effort". Trying to refer to a workspace index bigger than
@@ -510,6 +569,9 @@ binds {
 
     // Alternatively, there are commands to move just a single window:
     // Mod+Ctrl+1 { move-window-to-workspace 1; }
+
+    // Switches focus between the current and the previous workspace.
+    // Mod+Tab { focus-workspace-previous; }
 
     Mod+Comma  { consume-window-into-column; }
     Mod+Period { expel-window-from-column; }
@@ -555,6 +617,8 @@ binds {
     // Mod+Shift+E { quit skip-confirmation=true; }
     Mod+Shift+E { quit; }
 
+    // Powers off the monitors. To turn them back on, do any input like
+    // moving the mouse or pressing any other key.
     Mod+Shift+P { power-off-monitors; }
 
     // This debug bind will tint all surfaces green, unless they are being

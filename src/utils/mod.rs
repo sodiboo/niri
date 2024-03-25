@@ -14,14 +14,12 @@ use smithay::output::Output;
 use smithay::reexports::rustix::time::{clock_gettime, ClockId};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+pub mod id;
 pub mod spawning;
 pub mod watcher;
 
 pub static IS_SYSTEMD_SERVICE: AtomicBool = AtomicBool::new(false);
 
-pub fn clone2<T: Clone, U: Clone>(t: (&T, &U)) -> (T, U) {
-    (t.0.clone(), t.1.clone())
-}
 pub fn version() -> String {
     format!(
         "{} ({})",
@@ -37,6 +35,10 @@ pub fn get_monotonic_time() -> Duration {
 
 pub fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
     rect.loc + rect.size.downscale(2).to_point()
+}
+
+pub fn center_f64(rect: Rectangle<f64, Logical>) -> Point<f64, Logical> {
+    rect.loc + rect.size.downscale(2.0).to_point()
 }
 
 pub fn output_size(output: &Output) -> Size<i32, Logical> {

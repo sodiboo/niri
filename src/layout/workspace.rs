@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use niri_config::{CenterFocusedColumn, PresetWidth, Struts};
 use niri_ipc::SizeChange;
-use smithay::desktop::space::SpaceElement;
-use smithay::desktop::{layer_map_for_output, Window, WindowSurface};
+use smithay::desktop::{layer_map_for_output, Window};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+use smithay::wayland::compositor::send_surface_state;
 
 use super::tile::{Tile, TileRenderElement};
 use super::{LayoutElement, Options};
@@ -18,6 +18,7 @@ use crate::animation::Animation;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::swipe_tracker::SwipeTracker;
+use crate::utils::id::IdCounter;
 use crate::utils::output_size;
 
 /// Amount of touchpad movement to scroll the view for the width of one working area.
@@ -76,10 +77,24 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Configurable properties of the layout.
     pub options: Rc<Options>,
+
+    /// Unique ID of this workspace.
+    id: WorkspaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputId(String);
+
+static WORKSPACE_ID_COUNTER: IdCounter = IdCounter::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorkspaceId(u32);
+
+impl WorkspaceId {
+    fn next() -> WorkspaceId {
+        WorkspaceId(WORKSPACE_ID_COUNTER.next())
+    }
+}
 
 niri_render_elements! {
     WorkspaceRenderElement<R> => {
@@ -181,6 +196,15 @@ impl OutputId {
     }
 }
 
+impl ViewOffsetAdjustment {
+    pub fn target_view_offset(&self) -> f64 {
+        match self {
+            ViewOffsetAdjustment::Animation(anim) => anim.to(),
+            ViewOffsetAdjustment::Gesture(gesture) => gesture.current_view_offset,
+        }
+    }
+}
+
 impl ColumnWidth {
     fn resolve(self, options: &Options, view_width: i32) -> i32 {
         match self {
@@ -216,6 +240,7 @@ impl<W: LayoutElement> Workspace<W> {
             view_offset_adj: None,
             activate_prev_column_on_removal: None,
             options,
+            id: WorkspaceId::next(),
         }
     }
 
@@ -231,7 +256,12 @@ impl<W: LayoutElement> Workspace<W> {
             view_offset_adj: None,
             activate_prev_column_on_removal: None,
             options,
+            id: WorkspaceId::next(),
         }
+    }
+
+    pub fn id(&self) -> WorkspaceId {
+        self.id
     }
 
     pub fn advance_animations(&mut self, current_time: Duration, is_active: bool) {
@@ -268,6 +298,13 @@ impl<W: LayoutElement> Workspace<W> {
             .iter()
             .flat_map(|col| col.tiles.iter())
             .map(Tile::window)
+    }
+
+    pub fn windows_mut(&mut self) -> impl Iterator<Item = &mut W> + '_ {
+        self.columns
+            .iter_mut()
+            .flat_map(|col| col.tiles.iter_mut())
+            .map(Tile::window_mut)
     }
 
     pub fn set_output(&mut self, output: Option<Output>) {
@@ -568,12 +605,16 @@ impl<W: LayoutElement> Workspace<W> {
         self.windows().next().is_some()
     }
 
-    pub fn has_window(&self, window: &W) -> bool {
-        self.windows().any(|win| win == window)
+    pub fn has_window(&self, window: &W::Id) -> bool {
+        self.windows().any(|win| win.id() == window)
     }
 
     pub fn find_wl_surface(&self, wl_surface: &WlSurface) -> Option<&W> {
         self.windows().find(|win| win.is_wl_surface(wl_surface))
+    }
+
+    pub fn find_wl_surface_mut(&mut self, wl_surface: &WlSurface) -> Option<&mut W> {
+        self.windows_mut().find(|win| win.is_wl_surface(wl_surface))
     }
 
     /// Computes the X position of the windows in the given column, in logical coordinates.
@@ -652,7 +693,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn add_window_right_of(
         &mut self,
-        right_of: &W,
+        right_of: &W::Id,
         window: W,
         width: ColumnWidth,
         is_full_width: bool,
@@ -829,7 +870,7 @@ impl<W: LayoutElement> Workspace<W> {
         column
     }
 
-    pub fn remove_window(&mut self, window: &W) {
+    pub fn remove_window(&mut self, window: &W::Id) -> W {
         let column_idx = self
             .columns
             .iter()
@@ -838,10 +879,10 @@ impl<W: LayoutElement> Workspace<W> {
         let column = &self.columns[column_idx];
 
         let window_idx = column.position(window).unwrap();
-        self.remove_window_by_idx(column_idx, window_idx);
+        self.remove_window_by_idx(column_idx, window_idx)
     }
 
-    pub fn update_window(&mut self, window: &W) {
+    pub fn update_window(&mut self, window: &W::Id) {
         let (idx, column) = self
             .columns
             .iter_mut()
@@ -863,7 +904,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn activate_window(&mut self, window: &W) {
+    pub fn activate_window(&mut self, window: &W::Id) {
         let column_idx = self
             .columns
             .iter()
@@ -1148,6 +1189,31 @@ impl<W: LayoutElement> Workspace<W> {
         first.chain(rest)
     }
 
+    fn active_column_ref(&self) -> Option<&Column<W>> {
+        if self.columns.is_empty() {
+            return None;
+        }
+        Some(&self.columns[self.active_column_idx])
+    }
+
+    /// Returns the geometry of the active tile relative to and clamped to the view.
+    ///
+    /// During animations, assumes the final view position.
+    pub fn active_tile_visual_rectangle(&self) -> Option<Rectangle<i32, Logical>> {
+        let col = self.active_column_ref()?;
+        let view_pos = self
+            .view_offset_adj
+            .as_ref()
+            .map_or(self.view_offset, |adj| adj.target_view_offset() as i32);
+
+        let tile_pos = Point::from((-view_pos, col.tile_y(col.active_tile_idx)));
+        let tile_size = col.active_tile_ref().tile_size();
+        let tile_rect = Rectangle::from_loc_and_size(tile_pos, tile_size);
+
+        let view = Rectangle::from_loc_and_size((0, 0), self.view_size);
+        view.intersection(tile_rect)
+    }
+
     pub fn window_under(
         &self,
         pos: Point<f64, Logical>,
@@ -1202,7 +1268,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.columns[self.active_column_idx].set_window_height(change);
     }
 
-    pub fn set_fullscreen(&mut self, window: &W, is_fullscreen: bool) {
+    pub fn set_fullscreen(&mut self, window: &W::Id, is_fullscreen: bool) {
         let (mut col_idx, tile_idx) = self
             .columns
             .iter()
@@ -1244,7 +1310,7 @@ impl<W: LayoutElement> Workspace<W> {
         col.set_fullscreen(is_fullscreen);
     }
 
-    pub fn toggle_fullscreen(&mut self, window: &W) {
+    pub fn toggle_fullscreen(&mut self, window: &W::Id) {
         let col = self
             .columns
             .iter_mut()
@@ -1504,9 +1570,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         true
     }
-}
 
-impl Workspace<Window> {
     pub fn refresh(&self, is_active: bool) {
         let bounds = self.toplevel_bounds();
 
@@ -1623,18 +1687,21 @@ impl<W: LayoutElement> Column<W> {
         self.tiles.iter().any(Tile::are_animations_ongoing)
     }
 
-    pub fn contains(&self, window: &W) -> bool {
-        self.tiles.iter().map(Tile::window).any(|win| win == window)
-    }
-
-    pub fn position(&self, window: &W) -> Option<usize> {
+    pub fn contains(&self, window: &W::Id) -> bool {
         self.tiles
             .iter()
             .map(Tile::window)
-            .position(|win| win == window)
+            .any(|win| win.id() == window)
     }
 
-    fn activate_window(&mut self, window: &W) {
+    pub fn position(&self, window: &W::Id) -> Option<usize> {
+        self.tiles
+            .iter()
+            .map(Tile::window)
+            .position(|win| win.id() == window)
+    }
+
+    fn activate_window(&mut self, window: &W::Id) {
         let idx = self.position(window).unwrap();
         self.active_tile_idx = idx;
     }
@@ -1647,11 +1714,11 @@ impl<W: LayoutElement> Column<W> {
         self.update_tile_sizes();
     }
 
-    fn update_window(&mut self, window: &W) {
+    fn update_window(&mut self, window: &W::Id) {
         let tile = self
             .tiles
             .iter_mut()
-            .find(|tile| tile.window() == window)
+            .find(|tile| tile.window().id() == window)
             .unwrap();
         tile.update_window();
     }
@@ -2033,6 +2100,10 @@ impl<W: LayoutElement> Column<W> {
             y += tile.tile_size().h + self.options.gaps;
             pos
         })
+    }
+
+    fn active_tile_ref(&self) -> &Tile<W> {
+        &self.tiles[self.active_tile_idx]
     }
 }
 

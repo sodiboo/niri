@@ -1,9 +1,11 @@
 use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::collections::HashSet;
 use std::time::Duration;
 
+use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
-use niri_config::{Action, Binds, Modifiers};
+use niri_config::{Action, Bind, Binds, Key, Modifiers, Trigger};
 use niri_ipc::LayoutSwitchTarget;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
@@ -289,7 +291,7 @@ impl State {
                 .unwrap();
         }
 
-        let Some(Some(action)) = keyboard.input(
+        let Some(Some(bind)) = keyboard.input(
             self,
             event.key_code(),
             event.state(),
@@ -330,7 +332,40 @@ impl State {
             return;
         }
 
-        self.do_action(action);
+        self.handle_bind(bind);
+    }
+
+    pub fn handle_bind(&mut self, bind: Bind) {
+        let Some(cooldown) = bind.cooldown else {
+            self.do_action(bind.action);
+            return;
+        };
+
+        // Check this first so that it doesn't trigger the cooldown.
+        if self.niri.is_locked() && !allowed_when_locked(&bind.action) {
+            return;
+        }
+
+        match self.niri.bind_cooldown_timers.entry(bind.key) {
+            // The bind is on cooldown.
+            Entry::Occupied(_) => (),
+            Entry::Vacant(entry) => {
+                let timer = Timer::from_duration(cooldown);
+                let token = self
+                    .niri
+                    .event_loop
+                    .insert_source(timer, move |_, _, state| {
+                        if state.niri.bind_cooldown_timers.remove(&bind.key).is_none() {
+                            error!("bind cooldown timer entry disappeared");
+                        }
+                        TimeoutAction::Drop
+                    })
+                    .unwrap();
+                entry.insert(token);
+
+                self.do_action(bind.action);
+            }
+        }
     }
 
     pub fn do_action(&mut self, action: Action) {
@@ -420,21 +455,24 @@ impl State {
             }
             Action::ScreenshotWindow => {
                 let active = self.niri.layout.active_window();
-                if let Some((window, output)) = active {
+                if let Some((mapped, output)) = active {
                     self.backend.with_primary_renderer(|renderer| {
-                        if let Err(err) = self.niri.screenshot_window(renderer, output, window) {
+                        if let Err(err) =
+                            self.niri
+                                .screenshot_window(renderer, output, &mapped.window)
+                        {
                             warn!("error taking screenshot: {err:?}");
                         }
                     });
                 }
             }
             Action::CloseWindow => {
-                if let Some(window) = self.niri.layout.focus() {
-                    window.close()
+                if let Some(mapped) = self.niri.layout.focus() {
+                    mapped.close()
                 }
             }
             Action::FullscreenWindow => {
-                let focus = self.niri.layout.focus().cloned();
+                let focus = self.niri.layout.focus().map(|m| m.window.clone());
                 if let Some(window) = focus {
                     self.niri.layout.toggle_fullscreen(&window);
                     // FIXME: granular
@@ -452,139 +490,178 @@ impl State {
             }
             Action::MoveColumnLeft => {
                 self.niri.layout.move_left();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnRight => {
                 self.niri.layout.move_right();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToFirst => {
                 self.niri.layout.move_column_to_first();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToLast => {
                 self.niri.layout.move_column_to_last();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowDown => {
                 self.niri.layout.move_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowUp => {
                 self.niri.layout.move_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowDownOrToWorkspaceDown => {
                 self.niri.layout.move_down_or_to_workspace_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowUpOrToWorkspaceUp => {
                 self.niri.layout.move_up_or_to_workspace_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowLeft => {
                 self.niri.layout.consume_or_expel_window_left();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::ConsumeOrExpelWindowRight => {
                 self.niri.layout.consume_or_expel_window_right();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusColumnLeft => {
                 self.niri.layout.focus_left();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusColumnRight => {
                 self.niri.layout.focus_right();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusColumnFirst => {
                 self.niri.layout.focus_column_first();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusColumnLast => {
                 self.niri.layout.focus_column_last();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWindowDown => {
                 self.niri.layout.focus_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWindowUp => {
                 self.niri.layout.focus_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWindowOrWorkspaceDown => {
                 self.niri.layout.focus_window_or_workspace_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWindowOrWorkspaceUp => {
                 self.niri.layout.focus_window_or_workspace_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToWorkspaceDown => {
                 self.niri.layout.move_to_workspace_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToWorkspaceUp => {
                 self.niri.layout.move_to_workspace_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveWindowToWorkspace(idx) => {
                 let idx = idx.saturating_sub(1) as usize;
                 self.niri.layout.move_to_workspace(idx);
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToWorkspaceDown => {
                 self.niri.layout.move_column_to_workspace_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToWorkspaceUp => {
                 self.niri.layout.move_column_to_workspace_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::MoveColumnToWorkspace(idx) => {
                 let idx = idx.saturating_sub(1) as usize;
                 self.niri.layout.move_column_to_workspace(idx);
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWorkspaceDown => {
                 self.niri.layout.switch_workspace_down();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWorkspaceUp => {
                 self.niri.layout.switch_workspace_up();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::FocusWorkspace(idx) => {
                 let idx = idx.saturating_sub(1) as usize;
-                self.niri.layout.switch_workspace(idx);
+
+                let config = &self.niri.config;
+                if config.borrow().input.workspace_auto_back_and_forth {
+                    self.niri.layout.switch_workspace_auto_back_and_forth(idx);
+                } else {
+                    self.niri.layout.switch_workspace(idx);
+                }
+
+                self.maybe_warp_cursor_to_focus();
+                // FIXME: granular
+                self.niri.queue_redraw_all();
+            }
+            Action::FocusWorkspacePrevious => {
+                self.niri.layout.switch_workspace_previous();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
@@ -600,11 +677,14 @@ impl State {
             }
             Action::ConsumeWindowIntoColumn => {
                 self.niri.layout.consume_into_column();
+                // This does not cause immediate focus or window size change, so warping mouse to
+                // focus won't do anything here.
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
             Action::ExpelWindowFromColumn => {
                 self.niri.layout.expel_from_column();
+                self.maybe_warp_cursor_to_focus();
                 // FIXME: granular
                 self.niri.queue_redraw_all();
             }
@@ -622,81 +702,105 @@ impl State {
             Action::FocusMonitorLeft => {
                 if let Some(output) = self.niri.output_left() {
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::FocusMonitorRight => {
                 if let Some(output) = self.niri.output_right() {
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::FocusMonitorDown => {
                 if let Some(output) = self.niri.output_down() {
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::FocusMonitorUp => {
                 if let Some(output) = self.niri.output_up() {
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWindowToMonitorLeft => {
                 if let Some(output) = self.niri.output_left() {
                     self.niri.layout.move_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWindowToMonitorRight => {
                 if let Some(output) = self.niri.output_right() {
                     self.niri.layout.move_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWindowToMonitorDown => {
                 if let Some(output) = self.niri.output_down() {
                     self.niri.layout.move_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWindowToMonitorUp => {
                 if let Some(output) = self.niri.output_up() {
                     self.niri.layout.move_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveColumnToMonitorLeft => {
                 if let Some(output) = self.niri.output_left() {
                     self.niri.layout.move_column_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveColumnToMonitorRight => {
                 if let Some(output) = self.niri.output_right() {
                     self.niri.layout.move_column_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveColumnToMonitorDown => {
                 if let Some(output) = self.niri.output_down() {
                     self.niri.layout.move_column_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveColumnToMonitorUp => {
                 if let Some(output) = self.niri.output_up() {
                     self.niri.layout.move_column_to_output(&output);
                     self.niri.layout.focus_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::SetColumnWidth(change) => {
@@ -713,25 +817,33 @@ impl State {
             Action::MoveWorkspaceToMonitorLeft => {
                 if let Some(output) = self.niri.output_left() {
                     self.niri.layout.move_workspace_to_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWorkspaceToMonitorRight => {
                 if let Some(output) = self.niri.output_right() {
                     self.niri.layout.move_workspace_to_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWorkspaceToMonitorDown => {
                 if let Some(output) = self.niri.output_down() {
                     self.niri.layout.move_workspace_to_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
             Action::MoveWorkspaceToMonitorUp => {
                 if let Some(output) = self.niri.output_up() {
                     self.niri.layout.move_workspace_to_output(&output);
-                    self.move_cursor_to_output(&output);
+                    if !self.maybe_warp_cursor_to_focus_centered() {
+                        self.move_cursor_to_output(&output);
+                    }
                 }
             }
         }
@@ -757,12 +869,11 @@ impl State {
 
         // Check if we have an active pointer constraint.
         let mut pointer_confined = None;
-        if let Some(focus) = self.niri.pointer_focus.as_ref() {
-            let focus_surface_loc = focus.surface.1;
-            let pos_within_surface = pos.to_i32_round() - focus_surface_loc;
+        if let Some(focus) = &self.niri.pointer_focus.surface {
+            let pos_within_surface = pos.to_i32_round() - focus.1;
 
             let mut pointer_locked = false;
-            with_pointer_constraint(&focus.surface.0, &pointer, |constraint| {
+            with_pointer_constraint(&focus.0, &pointer, |constraint| {
                 let Some(constraint) = constraint else { return };
                 if !constraint.is_active() {
                     return;
@@ -780,7 +891,7 @@ impl State {
                         pointer_locked = true;
                     }
                     PointerConstraint::Confined(confine) => {
-                        pointer_confined = Some((focus.surface.clone(), confine.region().cloned()));
+                        pointer_confined = Some((focus.clone(), confine.region().cloned()));
                     }
                 }
             });
@@ -789,7 +900,7 @@ impl State {
             if pointer_locked {
                 pointer.relative_motion(
                     self,
-                    Some(focus.surface.clone()),
+                    Some(focus.clone()),
                     &RelativeMotionEvent {
                         delta: event.delta(),
                         delta_unaccel: event.delta_unaccel(),
@@ -854,7 +965,7 @@ impl State {
             let mut prevent = false;
 
             // Prevent the pointer from leaving the focused surface.
-            if Some(&focus_surface.0) != under.as_ref().map(|x| &x.surface.0) {
+            if Some(&focus_surface.0) != under.surface.as_ref().map(|(s, _)| s) {
                 prevent = true;
             }
 
@@ -883,15 +994,16 @@ impl State {
             }
         }
 
+        self.niri.handle_focus_follows_mouse(&under);
+
         // Activate a new confinement if necessary.
         self.niri.maybe_activate_pointer_constraint(new_pos, &under);
 
         self.niri.pointer_focus.clone_from(&under);
-        let under = under.map(|u| u.surface);
 
         pointer.motion(
             self,
-            under.clone(),
+            under.surface.clone(),
             &MotionEvent {
                 location: new_pos,
                 serial,
@@ -901,7 +1013,7 @@ impl State {
 
         pointer.relative_motion(
             self,
-            under,
+            under.surface,
             &RelativeMotionEvent {
                 delta: event.delta(),
                 delta_unaccel: event.delta_unaccel(),
@@ -948,13 +1060,15 @@ impl State {
         }
 
         let under = self.niri.surface_under_and_global_space(pos);
+
+        self.niri.handle_focus_follows_mouse(&under);
+
         self.niri.maybe_activate_pointer_constraint(pos, &under);
         self.niri.pointer_focus.clone_from(&under);
-        let under = under.map(|u| u.surface);
 
         pointer.motion(
             self,
-            under,
+            under.surface,
             &MotionEvent {
                 location: pos,
                 serial,
@@ -982,8 +1096,8 @@ impl State {
         let button_state = event.state();
 
         if ButtonState::Pressed == button_state {
-            if let Some(window) = self.niri.window_under_cursor() {
-                let window = window.clone();
+            if let Some(mapped) = self.niri.window_under_cursor() {
+                let window = mapped.window.clone();
                 self.niri.layout.activate_window(&window);
 
                 // FIXME: granular.
@@ -1040,30 +1154,92 @@ impl State {
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
         let source = event.source();
 
-        let horizontal_amount = event
-            .amount(Axis::Horizontal)
-            .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 3.0 / 120.);
-        let vertical_amount = event
-            .amount(Axis::Vertical)
-            .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 3.0 / 120.);
-        let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
-        let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
+        let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
+        let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
+
+        // Handle wheel bindings.
+        if source == AxisSource::Wheel {
+            let comp_mod = self.backend.mod_key();
+            let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
+
+            if let Some(v120) = horizontal_amount_v120 {
+                let config = self.niri.config.borrow();
+                let bindings = &config.binds;
+                let bind_left = find_configured_bind(bindings, comp_mod, Trigger::WheelLeft, mods);
+                let bind_right =
+                    find_configured_bind(bindings, comp_mod, Trigger::WheelRight, mods);
+                drop(config);
+
+                // If we have a bind with current modifiers along the scroll direction, then
+                // accumulate and don't pass to Wayland. If there's no bind, reset the accumulator.
+                if bind_left.is_some() || bind_right.is_some() {
+                    let ticks = self.niri.horizontal_wheel_tracker.accumulate(v120);
+                    if let Some(right) = bind_right {
+                        for _ in 0..ticks {
+                            self.handle_bind(right.clone());
+                        }
+                    }
+                    if let Some(left) = bind_left {
+                        for _ in ticks..0 {
+                            self.handle_bind(left.clone());
+                        }
+                    }
+                    return;
+                } else {
+                    self.niri.horizontal_wheel_tracker.reset();
+                }
+            }
+
+            if let Some(v120) = vertical_amount_v120 {
+                let config = self.niri.config.borrow();
+                let bindings = &config.binds;
+                let bind_up = find_configured_bind(bindings, comp_mod, Trigger::WheelUp, mods);
+                let bind_down = find_configured_bind(bindings, comp_mod, Trigger::WheelDown, mods);
+                drop(config);
+
+                if bind_up.is_some() || bind_down.is_some() {
+                    let ticks = self.niri.vertical_wheel_tracker.accumulate(v120);
+                    if let Some(down) = bind_down {
+                        for _ in 0..ticks {
+                            self.handle_bind(down.clone());
+                        }
+                    }
+                    if let Some(up) = bind_up {
+                        for _ in ticks..0 {
+                            self.handle_bind(up.clone());
+                        }
+                    }
+                    return;
+                } else {
+                    self.niri.vertical_wheel_tracker.reset();
+                }
+            }
+        }
+
+        let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
+            // Winit backend, discrete scrolling.
+            horizontal_amount_v120.unwrap_or(0.0) / 120. * 15.
+        });
+        let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
+            // Winit backend, discrete scrolling.
+            vertical_amount_v120.unwrap_or(0.0) / 120. * 15.
+        });
 
         let mut frame = AxisFrame::new(event.time_msec()).source(source);
         if horizontal_amount != 0.0 {
             frame = frame
                 .relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal));
             frame = frame.value(Axis::Horizontal, horizontal_amount);
-            if let Some(discrete) = horizontal_amount_discrete {
-                frame = frame.v120(Axis::Horizontal, discrete as i32);
+            if let Some(v120) = horizontal_amount_v120 {
+                frame = frame.v120(Axis::Horizontal, v120 as i32);
             }
         }
         if vertical_amount != 0.0 {
             frame =
                 frame.relative_direction(Axis::Vertical, event.relative_direction(Axis::Vertical));
             frame = frame.value(Axis::Vertical, vertical_amount);
-            if let Some(discrete) = vertical_amount_discrete {
-                frame = frame.v120(Axis::Vertical, discrete as i32);
+            if let Some(v120) = vertical_amount_v120 {
+                frame = frame.v120(Axis::Vertical, v120 as i32);
             }
         }
 
@@ -1092,7 +1268,6 @@ impl State {
         };
 
         let under = self.niri.surface_under_and_global_space(pos);
-        let under = under.map(|u| u.surface);
 
         let tablet_seat = self.niri.seat.tablet_seat();
         let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
@@ -1119,7 +1294,7 @@ impl State {
 
             tool.motion(
                 pos,
-                under,
+                under.surface,
                 &tablet,
                 SERIAL_COUNTER.next_serial(),
                 event.time_msec(),
@@ -1143,8 +1318,8 @@ impl State {
                     tool.tip_down(serial, event.time_msec());
 
                     if let Some(pos) = self.niri.tablet_cursor_location {
-                        if let Some(window) = self.niri.window_under(pos) {
-                            let window = window.clone();
+                        if let Some(mapped) = self.niri.window_under(pos) {
+                            let window = mapped.window.clone();
                             self.niri.layout.activate_window(&window);
 
                             // FIXME: granular.
@@ -1174,7 +1349,6 @@ impl State {
         };
 
         let under = self.niri.surface_under_and_global_space(pos);
-        let under = under.map(|u| u.surface);
 
         let tablet_seat = self.niri.seat.tablet_seat();
         let tool = tablet_seat.add_tool::<Self>(&self.niri.display_handle, &event.tool());
@@ -1182,7 +1356,7 @@ impl State {
         if let Some(tablet) = tablet {
             match event.state() {
                 ProximityState::In => {
-                    if let Some(under) = under {
+                    if let Some(under) = under.surface {
                         tool.proximity_in(
                             pos,
                             under,
@@ -1502,8 +1676,8 @@ impl State {
                 .output_under(touch_location)
                 .next()
                 .cloned();
-            if let Some(window) = self.niri.window_under(touch_location) {
-                let window = window.clone();
+            if let Some(mapped) = self.niri.window_under(touch_location) {
+                let window = mapped.window.clone();
                 self.niri.layout.activate_window(&window);
 
                 // FIXME: granular.
@@ -1517,13 +1691,10 @@ impl State {
         };
 
         let serial = SERIAL_COUNTER.next_serial();
-        let under = self
-            .niri
-            .surface_under_and_global_space(touch_location)
-            .map(|under| under.surface);
+        let under = self.niri.surface_under_and_global_space(touch_location);
         handle.down(
             self,
-            under,
+            under.surface,
             &DownEvent {
                 slot: evt.slot(),
                 location: touch_location,
@@ -1553,13 +1724,10 @@ impl State {
         let Some(touch_location) = self.compute_touch_location(&evt) else {
             return;
         };
-        let under = self
-            .niri
-            .surface_under_and_global_space(touch_location)
-            .map(|under| under.surface);
+        let under = self.niri.surface_under_and_global_space(touch_location);
         handle.motion(
             self,
-            under,
+            under.surface,
             &TouchMotionEvent {
                 slot: evt.slot(),
                 location: touch_location,
@@ -1596,7 +1764,7 @@ fn should_intercept_key(
     mods: ModifiersState,
     screenshot_ui: &ScreenshotUi,
     disable_power_key_handling: bool,
-) -> FilterResult<Option<Action>> {
+) -> FilterResult<Option<Bind>> {
     // Actions are only triggered on presses, release of the key
     // shouldn't try to intercept anything unless we have marked
     // the key to suppress.
@@ -1604,7 +1772,7 @@ fn should_intercept_key(
         return FilterResult::Forward;
     }
 
-    let mut final_action = action(
+    let mut final_bind = find_bind(
         bindings,
         comp_mod,
         modified,
@@ -1618,21 +1786,31 @@ fn should_intercept_key(
     if screenshot_ui.is_open() {
         let mut use_screenshot_ui_action = true;
 
-        if let Some(action) = &final_action {
-            if allowed_during_screenshot(action) {
+        if let Some(bind) = &final_bind {
+            if allowed_during_screenshot(&bind.action) {
                 use_screenshot_ui_action = false;
             }
         }
 
         if use_screenshot_ui_action {
-            final_action = screenshot_ui.action(raw, mods);
+            if let Some(raw) = raw {
+                final_bind = screenshot_ui.action(raw, mods).map(|action| Bind {
+                    key: Key {
+                        trigger: Trigger::Keysym(raw),
+                        // Not entirely correct but it doesn't matter in how we currently use it.
+                        modifiers: Modifiers::empty(),
+                    },
+                    action,
+                    cooldown: None,
+                });
+            }
         }
     }
 
-    match (final_action, pressed) {
-        (Some(action), true) => {
+    match (final_bind, pressed) {
+        (Some(bind), true) => {
             suppressed_keys.insert(key_code);
-            FilterResult::Intercept(Some(action))
+            FilterResult::Intercept(Some(bind))
         }
         (_, false) => {
             suppressed_keys.remove(&key_code);
@@ -1642,36 +1820,49 @@ fn should_intercept_key(
     }
 }
 
-fn action(
+fn find_bind(
     bindings: &Binds,
     comp_mod: CompositorMod,
     modified: Keysym,
     raw: Option<Keysym>,
     mods: ModifiersState,
     disable_power_key_handling: bool,
-) -> Option<Action> {
+) -> Option<Bind> {
     use keysyms::*;
 
     // Handle hardcoded binds.
     #[allow(non_upper_case_globals)] // wat
-    match modified.raw() {
+    let hardcoded_action = match modified.raw() {
         modified @ KEY_XF86Switch_VT_1..=KEY_XF86Switch_VT_12 => {
             let vt = (modified - KEY_XF86Switch_VT_1 + 1) as i32;
-            return Some(Action::ChangeVt(vt));
+            Some(Action::ChangeVt(vt))
         }
-        KEY_XF86PowerOff if !disable_power_key_handling => return Some(Action::Suspend),
-        _ => (),
+        KEY_XF86PowerOff if !disable_power_key_handling => Some(Action::Suspend),
+        _ => None,
+    };
+
+    if let Some(action) = hardcoded_action {
+        return Some(Bind {
+            key: Key {
+                // Not entirely correct but it doesn't matter in how we currently use it.
+                trigger: Trigger::Keysym(modified),
+                modifiers: Modifiers::empty(),
+            },
+            action,
+            cooldown: None,
+        });
     }
 
-    bound_action(bindings, comp_mod, raw, mods)
+    let trigger = Trigger::Keysym(raw?);
+    find_configured_bind(bindings, comp_mod, trigger, mods)
 }
 
-fn bound_action(
+fn find_configured_bind(
     bindings: &Binds,
     comp_mod: CompositorMod,
-    raw: Option<Keysym>,
+    trigger: Trigger,
     mods: ModifiersState,
-) -> Option<Action> {
+) -> Option<Bind> {
     // Handle configured binds.
     let mut modifiers = Modifiers::empty();
     if mods.ctrl {
@@ -1695,10 +1886,8 @@ fn bound_action(
         modifiers |= Modifiers::COMPOSITOR;
     }
 
-    let raw = raw?;
-
     for bind in &bindings.0 {
-        if bind.key.keysym != raw {
+        if bind.key.trigger != trigger {
             continue;
         }
 
@@ -1710,7 +1899,7 @@ fn bound_action(
         }
 
         if bind_modifiers == modifiers {
-            return Some(bind.action.clone());
+            return Some(bind.clone());
         }
     }
 
@@ -1815,6 +2004,12 @@ pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::
         } else if let Some(default) = device.config_tap_default_button_map() {
             let _ = device.config_tap_set_button_map(default);
         }
+
+        if let Some(method) = c.click_method {
+            let _ = device.config_click_set_method(method.into());
+        } else if let Some(default) = device.config_click_default_method() {
+            let _ = device.config_click_set_method(default);
+        }
     }
 
     // This is how Mutter tells apart mice.
@@ -1863,8 +2058,6 @@ pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::
 
 #[cfg(test)]
 mod tests {
-    use niri_config::{Bind, Key};
-
     use super::*;
 
     #[test]
@@ -1872,10 +2065,11 @@ mod tests {
         let close_keysym = Keysym::q;
         let bindings = Binds(vec![Bind {
             key: Key {
-                keysym: close_keysym,
+                trigger: Trigger::Keysym(close_keysym),
                 modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
             },
             action: Action::CloseWindow,
+            cooldown: None,
         }]);
 
         let comp_mod = CompositorMod::Super;
@@ -1930,7 +2124,10 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Action::CloseWindow))
+            FilterResult::Intercept(Some(Bind {
+                action: Action::CloseWindow,
+                ..
+            }))
         ));
         assert!(suppressed_keys.contains(&close_key_code));
 
@@ -1961,7 +2158,10 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Action::CloseWindow))
+            FilterResult::Intercept(Some(Bind {
+                action: Action::CloseWindow,
+                ..
+            }))
         ));
 
         let filter = none_key_event(&mut suppressed_keys, mods, true);
@@ -1978,7 +2178,10 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, true);
         assert!(matches!(
             filter,
-            FilterResult::Intercept(Some(Action::CloseWindow))
+            FilterResult::Intercept(Some(Bind {
+                action: Action::CloseWindow,
+                ..
+            }))
         ));
 
         mods = Default::default();
@@ -1994,90 +2197,97 @@ mod tests {
         let bindings = Binds(vec![
             Bind {
                 key: Key {
-                    keysym: Keysym::q,
+                    trigger: Trigger::Keysym(Keysym::q),
                     modifiers: Modifiers::COMPOSITOR,
                 },
                 action: Action::CloseWindow,
+                cooldown: None,
             },
             Bind {
                 key: Key {
-                    keysym: Keysym::h,
+                    trigger: Trigger::Keysym(Keysym::h),
                     modifiers: Modifiers::SUPER,
                 },
                 action: Action::FocusColumnLeft,
+                cooldown: None,
             },
             Bind {
                 key: Key {
-                    keysym: Keysym::j,
+                    trigger: Trigger::Keysym(Keysym::j),
                     modifiers: Modifiers::empty(),
                 },
                 action: Action::FocusWindowDown,
+                cooldown: None,
             },
             Bind {
                 key: Key {
-                    keysym: Keysym::k,
+                    trigger: Trigger::Keysym(Keysym::k),
                     modifiers: Modifiers::COMPOSITOR | Modifiers::SUPER,
                 },
                 action: Action::FocusWindowUp,
+                cooldown: None,
             },
             Bind {
                 key: Key {
-                    keysym: Keysym::l,
+                    trigger: Trigger::Keysym(Keysym::l),
                     modifiers: Modifiers::SUPER | Modifiers::ALT,
                 },
                 action: Action::FocusColumnRight,
+                cooldown: None,
             },
         ]);
 
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::q),
+                Trigger::Keysym(Keysym::q),
                 ModifiersState {
                     logo: true,
                     ..Default::default()
                 }
-            ),
-            Some(Action::CloseWindow)
+            )
+            .as_ref(),
+            Some(&bindings.0[0])
         );
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::q),
+                Trigger::Keysym(Keysym::q),
                 ModifiersState::default(),
             ),
             None,
         );
 
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::h),
+                Trigger::Keysym(Keysym::h),
                 ModifiersState {
                     logo: true,
                     ..Default::default()
                 }
-            ),
-            Some(Action::FocusColumnLeft)
+            )
+            .as_ref(),
+            Some(&bindings.0[1])
         );
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::h),
+                Trigger::Keysym(Keysym::h),
                 ModifiersState::default(),
             ),
             None,
         );
 
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::j),
+                Trigger::Keysym(Keysym::j),
                 ModifiersState {
                     logo: true,
                     ..Default::default()
@@ -2086,55 +2296,58 @@ mod tests {
             None,
         );
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::j),
+                Trigger::Keysym(Keysym::j),
                 ModifiersState::default(),
-            ),
-            Some(Action::FocusWindowDown)
+            )
+            .as_ref(),
+            Some(&bindings.0[2])
         );
 
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::k),
+                Trigger::Keysym(Keysym::k),
                 ModifiersState {
                     logo: true,
                     ..Default::default()
                 }
-            ),
-            Some(Action::FocusWindowUp)
+            )
+            .as_ref(),
+            Some(&bindings.0[3])
         );
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::k),
+                Trigger::Keysym(Keysym::k),
                 ModifiersState::default(),
             ),
             None,
         );
 
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::l),
+                Trigger::Keysym(Keysym::l),
                 ModifiersState {
                     logo: true,
                     alt: true,
                     ..Default::default()
                 }
-            ),
-            Some(Action::FocusColumnRight)
+            )
+            .as_ref(),
+            Some(&bindings.0[4])
         );
         assert_eq!(
-            bound_action(
+            find_configured_bind(
                 &bindings,
                 CompositorMod::Super,
-                Some(Keysym::l),
+                Trigger::Keysym(Keysym::l),
                 ModifiersState {
                     logo: true,
                     ..Default::default()

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use bitflags::bitflags;
 use knuffel::errors::DecodeError;
@@ -69,6 +70,12 @@ pub struct Input {
     pub touch: Touch,
     #[knuffel(child)]
     pub disable_power_key_handling: bool,
+    #[knuffel(child)]
+    pub warp_mouse_to_focus: bool,
+    #[knuffel(child)]
+    pub focus_follows_mouse: bool,
+    #[knuffel(child)]
+    pub workspace_auto_back_and_forth: bool,
 }
 
 #[derive(knuffel::Decode, Debug, Default, PartialEq, Eq)]
@@ -142,6 +149,8 @@ pub struct Touchpad {
     pub dwtp: bool,
     #[knuffel(child)]
     pub natural_scroll: bool,
+    #[knuffel(child, unwrap(argument, str))]
+    pub click_method: Option<ClickMethod>,
     #[knuffel(child, unwrap(argument), default)]
     pub accel_speed: f64,
     #[knuffel(child, unwrap(argument, str))]
@@ -168,6 +177,21 @@ pub struct Trackpoint {
     pub accel_speed: f64,
     #[knuffel(child, unwrap(argument, str))]
     pub accel_profile: Option<AccelProfile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickMethod {
+    Clickfinger,
+    ButtonAreas,
+}
+
+impl From<ClickMethod> for input::ClickMethod {
+    fn from(value: ClickMethod) -> Self {
+        match value {
+            ClickMethod::Clickfinger => Self::Clickfinger,
+            ClickMethod::ButtonAreas => Self::ButtonAreas,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,6 +675,7 @@ pub struct WindowRule {
     #[knuffel(children(name = "exclude"))]
     pub excludes: Vec<Match>,
 
+    // Rules applied at initial configure.
     #[knuffel(child)]
     pub default_column_width: Option<DefaultColumnWidth>,
     #[knuffel(child, unwrap(argument))]
@@ -659,6 +684,19 @@ pub struct WindowRule {
     pub open_maximized: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub open_fullscreen: Option<bool>,
+
+    // Rules applied dynamically.
+    #[knuffel(child, unwrap(argument))]
+    pub min_width: Option<u16>,
+    #[knuffel(child, unwrap(argument))]
+    pub min_height: Option<u16>,
+    #[knuffel(child, unwrap(argument))]
+    pub max_width: Option<u16>,
+    #[knuffel(child, unwrap(argument))]
+    pub max_height: Option<u16>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub draw_border_with_background: Option<bool>,
 }
 
 #[derive(knuffel::Decode, Debug, Default, Clone)]
@@ -679,16 +717,26 @@ impl PartialEq for Match {
 #[derive(Debug, Default, PartialEq)]
 pub struct Binds(pub Vec<Bind>);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Bind {
     pub key: Key,
     pub action: Action,
+    pub cooldown: Option<Duration>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub struct Key {
-    pub keysym: Keysym,
+    pub trigger: Trigger,
     pub modifiers: Modifiers,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum Trigger {
+    Keysym(Keysym),
+    WheelDown,
+    WheelUp,
+    WheelLeft,
+    WheelRight,
 }
 
 bitflags! {
@@ -745,6 +793,7 @@ pub enum Action {
     FocusWorkspaceDown,
     FocusWorkspaceUp,
     FocusWorkspace(#[knuffel(argument)] u8),
+    FocusWorkspacePrevious,
     MoveWindowToWorkspaceDown,
     MoveWindowToWorkspaceUp,
     MoveWindowToWorkspace(#[knuffel(argument)] u8),
@@ -814,6 +863,7 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::FocusWorkspaceDown => Self::FocusWorkspaceDown,
             niri_ipc::Action::FocusWorkspaceUp => Self::FocusWorkspaceUp,
             niri_ipc::Action::FocusWorkspace { index } => Self::FocusWorkspace(index),
+            niri_ipc::Action::FocusWorkspacePrevious => Self::FocusWorkspacePrevious,
             niri_ipc::Action::MoveWindowToWorkspaceDown => Self::MoveWindowToWorkspaceDown,
             niri_ipc::Action::MoveWindowToWorkspaceUp => Self::MoveWindowToWorkspaceUp,
             niri_ipc::Action::MoveWindowToWorkspace { index } => Self::MoveWindowToWorkspace(index),
@@ -1357,12 +1407,44 @@ where
         node: &knuffel::ast::SpannedNode<S>,
         ctx: &mut knuffel::decode::Context<S>,
     ) -> Result<Self, DecodeError<S>> {
-        expect_only_children(node, ctx);
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+
+        for val in node.arguments.iter() {
+            ctx.emit_error(DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "no arguments expected for this node",
+            ))
+        }
 
         let key = node
             .node_name
             .parse::<Key>()
             .map_err(|e| DecodeError::conversion(&node.node_name, e.wrap_err("invalid keybind")))?;
+
+        let mut cooldown = None;
+        for (name, val) in &node.properties {
+            match &***name {
+                "cooldown-ms" => {
+                    cooldown = Some(Duration::from_millis(
+                        knuffel::traits::DecodeScalar::decode(val, ctx)?,
+                    ));
+                }
+                name_str => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        name,
+                        "property",
+                        format!("unexpected property `{}`", name_str.escape_default()),
+                    ));
+                }
+            }
+        }
 
         let mut children = node.children();
 
@@ -1372,6 +1454,7 @@ where
         let dummy = Self {
             key,
             action: Action::Spawn(vec![]),
+            cooldown: None,
         };
 
         if let Some(child) = children.next() {
@@ -1383,7 +1466,11 @@ where
                 ));
             }
             match Action::decode_node(child, ctx) {
-                Ok(action) => Ok(Self { key, action }),
+                Ok(action) => Ok(Self {
+                    key,
+                    action,
+                    cooldown,
+                }),
                 Err(e) => {
                     ctx.emit_error(e);
                     Ok(dummy)
@@ -1460,12 +1547,37 @@ impl FromStr for Key {
             }
         }
 
-        let keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
-        if keysym.raw() == KEY_NoSymbol {
-            return Err(miette!("invalid key: {key}"));
-        }
+        let trigger = if key.eq_ignore_ascii_case("WheelDown") {
+            Trigger::WheelDown
+        } else if key.eq_ignore_ascii_case("WheelUp") {
+            Trigger::WheelUp
+        } else if key.eq_ignore_ascii_case("WheelLeft") {
+            Trigger::WheelLeft
+        } else if key.eq_ignore_ascii_case("WheelRight") {
+            Trigger::WheelRight
+        } else {
+            let keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
+            if keysym.raw() == KEY_NoSymbol {
+                return Err(miette!("invalid key: {key}"));
+            }
+            Trigger::Keysym(keysym)
+        };
 
-        Ok(Key { keysym, modifiers })
+        Ok(Key { trigger, modifiers })
+    }
+}
+
+impl FromStr for ClickMethod {
+    type Err = miette::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "clickfinger" => Ok(Self::Clickfinger),
+            "button-areas" => Ok(Self::ButtonAreas),
+            _ => Err(miette!(
+                r#"invalid click method, can be "button-areas" or "clickfinger""#
+            )),
+        }
     }
 }
 
@@ -1534,6 +1646,7 @@ mod tests {
                     tap
                     dwt
                     dwtp
+                    click-method "clickfinger"
                     accel-speed 0.2
                     accel-profile "flat"
                     tap-button-map "left-middle-right"
@@ -1560,6 +1673,10 @@ mod tests {
                 }
 
                 disable-power-key-handling
+
+                warp-mouse-to-focus
+                focus-follows-mouse
+                workspace-auto-back-and-forth
             }
 
             output "eDP-1" {
@@ -1654,6 +1771,7 @@ mod tests {
                 Mod+Comma { consume-window-into-column; }
                 Mod+1 { focus-workspace 1; }
                 Mod+Shift+E { quit skip-confirmation=true; }
+                Mod+WheelDown cooldown-ms=150 { focus-workspace-down; }
             }
 
             debug {
@@ -1676,6 +1794,7 @@ mod tests {
                         tap: true,
                         dwt: true,
                         dwtp: true,
+                        click_method: Some(ClickMethod::Clickfinger),
                         natural_scroll: false,
                         accel_speed: 0.2,
                         accel_profile: Some(AccelProfile::Flat),
@@ -1698,6 +1817,9 @@ mod tests {
                         map_to_output: Some("eDP-1".to_owned()),
                     },
                     disable_power_key_handling: true,
+                    warp_mouse_to_focus: true,
+                    focus_follows_mouse: true,
+                    workspace_auto_back_and_forth: true,
                 },
                 outputs: vec![Output {
                     off: false,
@@ -1833,52 +1955,67 @@ mod tests {
                 binds: Binds(vec![
                     Bind {
                         key: Key {
-                            keysym: Keysym::t,
+                            trigger: Trigger::Keysym(Keysym::t),
                             modifiers: Modifiers::COMPOSITOR,
                         },
                         action: Action::Spawn(vec!["alacritty".to_owned()]),
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::q,
+                            trigger: Trigger::Keysym(Keysym::q),
                             modifiers: Modifiers::COMPOSITOR,
                         },
                         action: Action::CloseWindow,
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::h,
+                            trigger: Trigger::Keysym(Keysym::h),
                             modifiers: Modifiers::COMPOSITOR | Modifiers::SHIFT,
                         },
                         action: Action::FocusMonitorLeft,
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::l,
+                            trigger: Trigger::Keysym(Keysym::l),
                             modifiers: Modifiers::COMPOSITOR | Modifiers::SHIFT | Modifiers::CTRL,
                         },
                         action: Action::MoveWindowToMonitorRight,
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::comma,
+                            trigger: Trigger::Keysym(Keysym::comma),
                             modifiers: Modifiers::COMPOSITOR,
                         },
                         action: Action::ConsumeWindowIntoColumn,
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::_1,
+                            trigger: Trigger::Keysym(Keysym::_1),
                             modifiers: Modifiers::COMPOSITOR,
                         },
                         action: Action::FocusWorkspace(1),
+                        cooldown: None,
                     },
                     Bind {
                         key: Key {
-                            keysym: Keysym::e,
+                            trigger: Trigger::Keysym(Keysym::e),
                             modifiers: Modifiers::COMPOSITOR | Modifiers::SHIFT,
                         },
                         action: Action::Quit(true),
+                        cooldown: None,
+                    },
+                    Bind {
+                        key: Key {
+                            trigger: Trigger::WheelDown,
+                            modifiers: Modifiers::COMPOSITOR,
+                        },
+                        action: Action::FocusWorkspaceDown,
+                        cooldown: Some(Duration::from_millis(150)),
                     },
                 ]),
                 debug: DebugConfig {

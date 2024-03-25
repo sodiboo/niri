@@ -11,7 +11,7 @@ use std::{env, iter, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{ensure, Context};
 use calloop::futures::Scheduler;
-use niri_config::{Config, TrackLayout};
+use niri_config::{Config, Key, TrackLayout};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
@@ -85,6 +85,7 @@ use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::{TabletManagerState, TabletSeatTrait};
 use smithay::wayland::text_input::TextInputManagerState;
+use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
@@ -102,6 +103,7 @@ use crate::input::{apply_libinput_settings, TabletData};
 use crate::ipc::server::IpcServer;
 use crate::layout::{Layout, MonitorRenderElement};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
+use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyManagerState};
 use crate::pw_utils::{Cast, PipeWire};
 use crate::render_helpers::renderer::NiriRenderer;
@@ -112,9 +114,10 @@ use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::screenshot_ui::{ScreenshotUi, ScreenshotUiRenderElement};
 use crate::utils::spawning::CHILD_ENV;
 use crate::utils::{
-    center, get_monotonic_time, make_screenshot_path, output_size, write_png_rgba8,
+    center, center_f64, get_monotonic_time, make_screenshot_path, output_size, write_png_rgba8,
 };
-use crate::window::Unmapped;
+use crate::wheel_tracker::WheelTracker;
+use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
 use crate::{animation, niri_render_elements};
 
 const CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.2, 1.];
@@ -138,7 +141,7 @@ pub struct Niri {
 
     // Each workspace corresponds to a Space. Each workspace generally has one Output mapped to it,
     // however it may have none (when there are no outputs connected) or mutiple (when mirroring).
-    pub layout: Layout<Window>,
+    pub layout: Layout<Mapped>,
 
     // This space does not actually contain any windows, but all outputs are mapped into it
     // according to their global position.
@@ -166,6 +169,7 @@ pub struct Niri {
     pub session_lock_state: SessionLockManagerState,
     pub foreign_toplevel_state: ForeignToplevelManagerState,
     pub screencopy_state: ScreencopyManagerState,
+    pub viewporter_state: ViewporterState,
     pub xdg_foreign_state: XdgForeignState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
@@ -187,15 +191,13 @@ pub struct Niri {
     pub popup_grab: Option<PopupGrabState>,
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
+    pub gamma_control_manager_state: GammaControlManagerState,
 
     pub seat: Seat<State>,
     /// Scancodes of the keys to suppress.
     pub suppressed_keys: HashSet<u32>,
-    // This is always a toplevel surface focused as far as niri's logic is concerned, even when
-    // popup grabs are active (which means the real keyboard focus is on a popup descending from
-    // this toplevel surface).
-    pub keyboard_focus: Option<WlSurface>,
-
+    pub bind_cooldown_timers: HashMap<Key, RegistrationToken>,
+    pub keyboard_focus: KeyboardFocus,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
 
@@ -203,9 +205,11 @@ pub struct Niri {
     pub cursor_texture_cache: CursorTextureCache,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dnd_icon: Option<WlSurface>,
-    pub pointer_focus: Option<PointerFocus>,
+    pub pointer_focus: PointerFocus,
     pub tablet_cursor_location: Option<Point<f64, Logical>>,
     pub gesture_swipe_3f_cumulative: Option<(f64, f64)>,
+    pub vertical_wheel_tracker: WheelTracker,
+    pub horizontal_wheel_tracker: WheelTracker,
 
     pub lock_state: LockState,
 
@@ -287,10 +291,26 @@ pub struct PopupGrabState {
     pub grab: PopupGrab<State>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+// The surfaces here are always toplevel surfaces focused as far as niri's logic is concerned, even
+// when popup grabs are active (which means the real keyboard focus is on a popup descending from
+// that toplevel surface).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyboardFocus {
+    // Layout is focused by default if there's nothing else to focus.
+    Layout { surface: Option<WlSurface> },
+    LayerShell { surface: WlSurface },
+    LockScreen { surface: Option<WlSurface> },
+    ScreenshotUi,
+}
+
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct PointerFocus {
-    pub output: Output,
-    pub surface: (WlSurface, Point<i32, Logical>),
+    // Output under pointer.
+    pub output: Option<Output>,
+    // Surface under pointer and its location in global coordinate space.
+    pub surface: Option<(WlSurface, Point<i32, Logical>)>,
+    // If surface belongs to a window, this is that window.
+    pub window: Option<Window>,
 }
 
 #[derive(Default)]
@@ -317,6 +337,11 @@ struct SurfaceFrameThrottlingState {
     last_sent_at: RefCell<Option<(Output, u32)>>,
 }
 
+pub enum CenterCoords {
+    Seperately,
+    Both,
+}
+
 #[derive(Default)]
 pub struct WindowOffscreenId(pub RefCell<Option<Id>>);
 
@@ -325,6 +350,30 @@ impl Default for SurfaceFrameThrottlingState {
         Self {
             last_sent_at: RefCell::new(None),
         }
+    }
+}
+
+impl KeyboardFocus {
+    pub fn surface(&self) -> Option<&WlSurface> {
+        match self {
+            KeyboardFocus::Layout { surface } => surface.as_ref(),
+            KeyboardFocus::LayerShell { surface } => Some(surface),
+            KeyboardFocus::LockScreen { surface } => surface.as_ref(),
+            KeyboardFocus::ScreenshotUi => None,
+        }
+    }
+
+    pub fn into_surface(self) -> Option<WlSurface> {
+        match self {
+            KeyboardFocus::Layout { surface } => surface,
+            KeyboardFocus::LayerShell { surface } => Some(surface),
+            KeyboardFocus::LockScreen { surface } => surface,
+            KeyboardFocus::ScreenshotUi => None,
+        }
+    }
+
+    pub fn is_layout(&self) -> bool {
+        matches!(self, KeyboardFocus::Layout { .. })
     }
 }
 
@@ -396,12 +445,11 @@ impl State {
         self.niri
             .maybe_activate_pointer_constraint(location, &under);
         self.niri.pointer_focus.clone_from(&under);
-        let under = under.map(|u| u.surface);
 
         let pointer = &self.niri.seat.get_pointer().unwrap();
         pointer.motion(
             self,
-            under,
+            under.surface,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -411,6 +459,86 @@ impl State {
         pointer.frame(self);
         // FIXME: granular
         self.niri.queue_redraw_all();
+    }
+
+    /// Moves cursor within the specified rectangle, only adjusting coordinates if needed.
+    fn move_cursor_to_rect(&mut self, rect: Rectangle<f64, Logical>, mode: CenterCoords) -> bool {
+        let pointer = &self.niri.seat.get_pointer().unwrap();
+        let cur_loc = pointer.current_location();
+        let x_in_bound = cur_loc.x >= rect.loc.x && cur_loc.x <= rect.loc.x + rect.size.w;
+        let y_in_bound = cur_loc.y >= rect.loc.y && cur_loc.y <= rect.loc.y + rect.size.h;
+
+        let p = match mode {
+            CenterCoords::Seperately => {
+                if x_in_bound && y_in_bound {
+                    return false;
+                } else if y_in_bound {
+                    // adjust x
+                    Point::from((rect.loc.x + rect.size.w / 2.0, cur_loc.y))
+                } else if x_in_bound {
+                    // adjust y
+                    Point::from((cur_loc.x, rect.loc.y + rect.size.h / 2.0))
+                } else {
+                    // adjust x and y
+                    center_f64(rect)
+                }
+            }
+            CenterCoords::Both => {
+                if x_in_bound && y_in_bound {
+                    return false;
+                } else {
+                    // adjust x and y
+                    center_f64(rect)
+                }
+            }
+        };
+
+        self.move_cursor(p);
+        true
+    }
+
+    pub fn move_cursor_to_focused_tile(&mut self, mode: CenterCoords) -> bool {
+        if !self.niri.keyboard_focus.is_layout() {
+            return false;
+        }
+
+        if self.niri.tablet_cursor_location.is_some() {
+            return false;
+        }
+
+        let Some(output) = self.niri.layout.active_output() else {
+            return false;
+        };
+        let output = output.clone();
+        let monitor = self.niri.layout.monitor_for_output(&output).unwrap();
+
+        let mut rv = false;
+        let rect = monitor.active_tile_visual_rectangle();
+
+        if let Some(rect) = rect {
+            let output_geo = self.niri.global_space.output_geometry(&output).unwrap();
+            let mut rect = rect;
+            rect.loc += output_geo.loc;
+            rv = self.move_cursor_to_rect(rect.to_f64(), mode);
+        }
+
+        rv
+    }
+
+    pub fn maybe_warp_cursor_to_focus(&mut self) -> bool {
+        if !self.niri.config.borrow().input.warp_mouse_to_focus {
+            return false;
+        }
+
+        self.move_cursor_to_focused_tile(CenterCoords::Seperately)
+    }
+
+    pub fn maybe_warp_cursor_to_focus_centered(&mut self) -> bool {
+        if !self.niri.config.borrow().input.warp_mouse_to_focus {
+            return false;
+        }
+
+        self.move_cursor_to_focused_tile(CenterCoords::Both)
     }
 
     pub fn refresh_pointer_focus(&mut self) {
@@ -455,11 +583,10 @@ impl State {
             .maybe_activate_pointer_constraint(location, &under);
 
         self.niri.pointer_focus.clone_from(&under);
-        let under = under.map(|u| u.surface);
 
         pointer.motion(
             self,
-            under,
+            under.surface,
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -498,9 +625,11 @@ impl State {
 
     pub fn update_keyboard_focus(&mut self) {
         let focus = if self.niri.is_locked() {
-            self.niri.lock_surface_focus()
+            KeyboardFocus::LockScreen {
+                surface: self.niri.lock_surface_focus(),
+            }
         } else if self.niri.screenshot_ui.is_open() {
-            None
+            KeyboardFocus::ScreenshotUi
         } else if let Some(output) = self.niri.layout.active_output() {
             let mon = self.niri.layout.monitor_for_output(output).unwrap();
             let layers = layer_map_for_output(output);
@@ -513,14 +642,25 @@ impl State {
                     .map(|l| (&g.root, l.layer()))
             });
             let grab_on_layer = |layer: Layer| {
-                layer_grab.and_then(move |(s, l)| if l == layer { Some(s.clone()) } else { None })
+                layer_grab
+                    .and_then(move |(s, l)| if l == layer { Some(s.clone()) } else { None })
+                    .map(|surface| KeyboardFocus::LayerShell { surface })
             };
 
-            let layout_focus = || self.niri.layout.focus().and_then(|win| win.wl_surface());
+            let layout_focus = || {
+                self.niri
+                    .layout
+                    .focus()
+                    .and_then(|win| win.wl_surface())
+                    .map(|surface| KeyboardFocus::Layout {
+                        surface: Some(surface),
+                    })
+            };
             let layer_focus = |surface: &LayerSurface| {
                 surface
                     .can_receive_keyboard_focus()
                     .then(|| surface.wl_surface().clone())
+                    .map(|surface| KeyboardFocus::LayerShell { surface })
             };
 
             let mut surface = grab_on_layer(Layer::Overlay);
@@ -539,9 +679,9 @@ impl State {
                 surface = surface.or_else(layout_focus);
             }
 
-            surface
+            surface.unwrap_or(KeyboardFocus::Layout { surface: None })
         } else {
-            None
+            KeyboardFocus::Layout { surface: None }
         };
 
         let keyboard = self.niri.seat.get_keyboard().unwrap();
@@ -553,7 +693,7 @@ impl State {
             );
 
             if let Some(grab) = self.niri.popup_grab.as_mut() {
-                if Some(&grab.root) != focus.as_ref() {
+                if Some(&grab.root) != focus.surface() {
                     trace!(
                         "grab root {:?} is not the new focus {:?}, ungrabbing",
                         grab.root,
@@ -577,7 +717,7 @@ impl State {
 
                 let mut new_layout = current_layout;
                 // Store the currently active layout for the surface.
-                if let Some(current_focus) = self.niri.keyboard_focus.as_ref() {
+                if let Some(current_focus) = self.niri.keyboard_focus.surface() {
                     with_states(current_focus, |data| {
                         let cell = data
                             .data_map
@@ -586,7 +726,7 @@ impl State {
                     });
                 }
 
-                if let Some(focus) = focus.as_ref() {
+                if let Some(focus) = focus.surface() {
                     new_layout = with_states(focus, |data| {
                         let cell = data.data_map.get_or_insert::<Cell<KeyboardLayout>, _>(|| {
                             // The default layout is effectively the first layout in the
@@ -596,7 +736,7 @@ impl State {
                         cell.get()
                     });
                 }
-                if new_layout != current_layout && focus.is_some() {
+                if new_layout != current_layout && focus.surface().is_some() {
                     keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
                     keyboard.with_xkb_state(self, |mut context| {
                         context.set_layout(new_layout);
@@ -605,7 +745,7 @@ impl State {
             }
 
             self.niri.keyboard_focus.clone_from(&focus);
-            keyboard.set_focus(self, focus, SERIAL_COUNTER.next_serial());
+            keyboard.set_focus(self, focus.into_surface(), SERIAL_COUNTER.next_serial());
 
             // FIXME: can be more granular.
             self.niri.queue_redraw_all();
@@ -641,6 +781,7 @@ impl State {
         let mut reload_xkb = None;
         let mut libinput_config_changed = false;
         let mut output_config_changed = false;
+        let mut window_rules_changed = false;
         let mut old_config = self.niri.config.borrow_mut();
 
         // Reload the cursor.
@@ -680,6 +821,10 @@ impl State {
 
         if config.binds != old_config.binds {
             self.niri.hotkey_overlay.on_hotkey_config_updated();
+        }
+
+        if config.window_rules != old_config.window_rules {
+            window_rules_changed = true;
         }
 
         *old_config = config;
@@ -745,6 +890,30 @@ impl State {
             }
         }
 
+        if window_rules_changed {
+            let _span = tracy_client::span!("recompute window rules");
+
+            let window_rules = &self.niri.config.borrow().window_rules;
+
+            for unmapped in self.niri.unmapped_windows.values_mut() {
+                if let InitialConfigureState::Configured { rules, .. } = &mut unmapped.state {
+                    *rules = ResolvedWindowRules::compute(
+                        window_rules,
+                        unmapped.window.toplevel().expect("no X11 support"),
+                    );
+                }
+            }
+
+            let mut windows = vec![];
+            self.niri.layout.with_windows_mut(|mapped, _| {
+                mapped.rules = ResolvedWindowRules::compute(window_rules, mapped.toplevel());
+                windows.push(mapped.window.clone());
+            });
+            for win in windows {
+                self.niri.layout.update_window(&win);
+            }
+        }
+
         // Can't really update xdg-decoration settings since we have to hide the globals for CSD
         // due to the SDL2 bug... I don't imagine clients are prepared for the xdg-decoration
         // global suddenly appearing? Either way, right now it's live-reloaded in a sense that new
@@ -778,7 +947,11 @@ impl State {
                     }
                 };
 
-                let pw = self.niri.pipewire.as_ref().unwrap();
+                let Some(pw) = &self.niri.pipewire else {
+                    error!("screencasting must be disabled if PipeWire is missing");
+                    return;
+                };
+
                 match pw.start_cast(
                     to_niri.clone(),
                     gbm,
@@ -921,7 +1094,14 @@ impl Niri {
         );
         let screencopy_state =
             ScreencopyManagerState::new::<State, _>(&display_handle, ClientState::unrestricted);
+        let viewporter_state = ViewporterState::new::<State>(&display_handle);
         let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
+
+        let is_tty = matches!(backend, Backend::Tty(_));
+        let gamma_control_manager_state =
+            GammaControlManagerState::new::<State, _>(&display_handle, move |client| {
+                is_tty && !client.get_data::<ClientState>().unwrap().restricted
+            });
 
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         seat.add_keyboard(
@@ -1108,6 +1288,7 @@ impl Niri {
             session_lock_state,
             foreign_toplevel_state,
             screencopy_state,
+            viewporter_state,
             xdg_foreign_state,
             text_input_state,
             input_method_state,
@@ -1128,20 +1309,24 @@ impl Niri {
             popups: PopupManager::default(),
             popup_grab: None,
             suppressed_keys: HashSet::new(),
+            bind_cooldown_timers: HashMap::new(),
             presentation_state,
             security_context_state,
+            gamma_control_manager_state,
 
             seat,
-            keyboard_focus: None,
+            keyboard_focus: KeyboardFocus::Layout { surface: None },
             idle_inhibiting_surfaces: HashSet::new(),
             is_fdo_idle_inhibited: Arc::new(AtomicBool::new(false)),
             cursor_manager,
             cursor_texture_cache: Default::default(),
             cursor_shape_manager_state,
             dnd_icon: None,
-            pointer_focus: None,
+            pointer_focus: PointerFocus::default(),
             tablet_cursor_location: None,
             gesture_swipe_3f_cumulative: None,
+            vertical_wheel_tracker: WheelTracker::new(),
+            horizontal_wheel_tracker: WheelTracker::new(),
 
             lock_state: LockState::Unlocked,
 
@@ -1367,6 +1552,7 @@ impl Niri {
         self.layout.remove_output(output);
         self.global_space.unmap_output(output);
         self.reposition_outputs(None);
+        self.gamma_control_manager_state.output_removed(output);
 
         let state = self.output_state.remove(output).unwrap();
         self.output_by_name.remove(&output.name()).unwrap();
@@ -1503,7 +1689,7 @@ impl Niri {
     ///
     /// The cursor may be inside the window's activation region, but not within the window's input
     /// region.
-    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<&Window> {
+    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<&Mapped> {
         if self.is_locked() || self.screenshot_ui.is_open() {
             return None;
         }
@@ -1530,7 +1716,7 @@ impl Niri {
     ///
     /// The cursor may be inside the window's activation region, but not within the window's input
     /// region.
-    pub fn window_under_cursor(&self) -> Option<&Window> {
+    pub fn window_under_cursor(&self) -> Option<&Mapped> {
         let pos = self.seat.get_pointer().unwrap().current_location();
         self.window_under(pos)
     }
@@ -1540,31 +1726,39 @@ impl Niri {
     /// Pointer needs location in global space, and focused window location compatible with that
     /// global space. We don't have a global space for all windows, but this function converts the
     /// window location temporarily to the current global space.
-    pub fn surface_under_and_global_space(
-        &mut self,
-        pos: Point<f64, Logical>,
-    ) -> Option<PointerFocus> {
-        let (output, pos_within_output) = self.output_under(pos)?;
+    pub fn surface_under_and_global_space(&mut self, pos: Point<f64, Logical>) -> PointerFocus {
+        let mut rv = PointerFocus::default();
+
+        let Some((output, pos_within_output)) = self.output_under(pos) else {
+            return rv;
+        };
+        rv.output = Some(output.clone());
+        let output_pos_in_global_space = self.global_space.output_geometry(output).unwrap().loc;
 
         if self.is_locked() {
-            let state = self.output_state.get(output)?;
-            let surface = state.lock_surface.as_ref()?;
-            // We put lock surfaces at (0, 0).
-            let point = pos_within_output;
-            let (surface, point) = under_from_surface_tree(
+            let Some(state) = self.output_state.get(output) else {
+                return rv;
+            };
+            let Some(surface) = state.lock_surface.as_ref() else {
+                return rv;
+            };
+
+            rv.surface = under_from_surface_tree(
                 surface.wl_surface(),
-                point,
+                pos_within_output,
+                // We put lock surfaces at (0, 0).
                 (0, 0),
                 WindowSurfaceType::ALL,
-            )?;
-            return Some(PointerFocus {
-                output: output.clone(),
-                surface: (surface, point),
+            )
+            .map(|(surface, pos_within_output)| {
+                (surface, pos_within_output + output_pos_in_global_space)
             });
+
+            return rv;
         }
 
         if self.screenshot_ui.is_open() {
-            return None;
+            return rv;
         }
 
         let layers = layer_map_for_output(output);
@@ -1582,13 +1776,15 @@ impl Niri {
                             (surface, pos_within_layer + layer_pos_within_output)
                         })
                 })
+                .map(|s| (s, None))
         };
 
         let window_under = || {
             self.layout
                 .window_under(output, pos_within_output)
-                .and_then(|(window, win_pos_within_output)| {
+                .and_then(|(mapped, win_pos_within_output)| {
                     let win_pos_within_output = win_pos_within_output?;
+                    let window = &mapped.window;
                     window
                         .surface_under(
                             pos_within_output - win_pos_within_output.to_f64(),
@@ -1597,6 +1793,7 @@ impl Niri {
                         .map(|(s, pos_within_window)| {
                             (s, pos_within_window + win_pos_within_output)
                         })
+                        .map(|s| (s, Some(window.clone())))
                 })
         };
 
@@ -1614,17 +1811,18 @@ impl Niri {
                 .or_else(window_under);
         }
 
-        let (surface, surface_pos_within_output) = under
+        let Some(((surface, surface_pos_within_output), window)) = under
             .or_else(|| layer_surface_under(Layer::Bottom))
-            .or_else(|| layer_surface_under(Layer::Background))?;
+            .or_else(|| layer_surface_under(Layer::Background))
+        else {
+            return rv;
+        };
 
-        let output_pos_in_global_space = self.global_space.output_geometry(output).unwrap().loc;
         let surface_loc_in_global_space = surface_pos_within_output + output_pos_in_global_space;
 
-        Some(PointerFocus {
-            output: output.clone(),
-            surface: (surface, surface_loc_in_global_space),
-        })
+        rv.surface = Some((surface, surface_loc_in_global_space));
+        rv.window = window;
+        rv
     }
 
     pub fn output_under_cursor(&self) -> Option<Output> {
@@ -2322,7 +2520,8 @@ impl Niri {
         // The reason to do this at all is that it keeps track of whether the surface is visible or
         // not in a unified way with the pointer surfaces, which makes the logic elsewhere simpler.
 
-        for win in self.layout.windows_for_output(output) {
+        for mapped in self.layout.windows_for_output(output) {
+            let win = &mapped.window;
             let offscreen_id = win
                 .user_data()
                 .get_or_insert(WindowOffscreenId::default)
@@ -2393,8 +2592,8 @@ impl Niri {
         // We can unconditionally send the current output's feedback to regular and layer-shell
         // surfaces, as they can only be displayed on a single output at a time. Even if a surface
         // is currently invisible, this is the DMABUF feedback that it should know about.
-        for win in self.layout.windows_for_output(output) {
-            win.send_dmabuf_feedback(
+        for mapped in self.layout.windows_for_output(output) {
+            mapped.window.send_dmabuf_feedback(
                 output,
                 |_, _| Some(output.clone()),
                 |surface, _| {
@@ -2513,8 +2712,8 @@ impl Niri {
 
         let frame_callback_time = get_monotonic_time();
 
-        for win in self.layout.windows_for_output(output) {
-            win.send_frame(
+        for mapped in self.layout.windows_for_output(output) {
+            mapped.window.send_frame(
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
@@ -2579,8 +2778,8 @@ impl Niri {
 
         let frame_callback_time = get_monotonic_time();
 
-        self.layout.with_windows(|win, _| {
-            win.send_frame(
+        self.layout.with_windows(|mapped, _| {
+            mapped.window.send_frame(
                 output,
                 frame_callback_time,
                 FRAME_CALLBACK_THROTTLE,
@@ -2659,8 +2858,8 @@ impl Niri {
             );
         }
 
-        for win in self.layout.windows_for_output(output) {
-            win.take_presentation_feedback(
+        for mapped in self.layout.windows_for_output(output) {
+            mapped.window.take_presentation_feedback(
                 &mut feedback,
                 surface_primary_scanout_output,
                 |surface, _| {
@@ -3161,11 +3360,13 @@ impl Niri {
     pub fn maybe_activate_pointer_constraint(
         &self,
         new_pos: Point<f64, Logical>,
-        new_under: &Option<PointerFocus>,
+        new_under: &PointerFocus,
     ) {
-        let Some(under) = new_under else { return };
+        let Some((surface, surface_loc)) = &new_under.surface else {
+            return;
+        };
         let pointer = &self.seat.get_pointer().unwrap();
-        with_pointer_constraint(&under.surface.0, pointer, |constraint| {
+        with_pointer_constraint(surface, pointer, |constraint| {
             let Some(constraint) = constraint else { return };
             if constraint.is_active() {
                 return;
@@ -3173,7 +3374,7 @@ impl Niri {
 
             // Constraint does not apply if not within region.
             if let Some(region) = constraint.region() {
-                let new_pos_within_surface = new_pos.to_i32_round() - under.surface.1;
+                let new_pos_within_surface = new_pos.to_i32_round() - *surface_loc;
                 if !region.contains(new_pos_within_surface) {
                     return;
                 }
