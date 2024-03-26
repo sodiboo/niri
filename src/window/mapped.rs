@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 
 use niri_config::{BlockOutFrom, WindowRule};
+use smithay::backend::egl::surface;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements as _, Id, Kind};
 use smithay::desktop::space::SpaceElement as _;
@@ -260,14 +261,21 @@ impl crate::layout::LayoutElement for Mapped {
     }
 
     fn set_activated(&mut self, active: bool) {
-        let changed = self.toplevel().with_pending_state(|state| {
-            if active {
-                state.states.set(xdg_toplevel::State::Activated)
-            } else {
-                state.states.unset(xdg_toplevel::State::Activated)
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => {
+                let changed = toplevel.with_pending_state(|state| {
+                    if active {
+                        state.states.set(xdg_toplevel::State::Activated)
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Activated)
+                    }
+                });
+                self.need_to_recompute_rules |= changed;
             }
-        });
-        self.need_to_recompute_rules |= changed;
+            WindowSurface::X11(surface) => {
+                surface.set_activated(active).xunwrap();
+            }
+        }
     }
 
     fn set_bounds(&self, bounds: Size<i32, Logical>) {

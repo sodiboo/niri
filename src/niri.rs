@@ -687,7 +687,7 @@ impl State {
                 self.niri
                     .layout
                     .focus()
-                    .and_then(|win| win.wl_surface())
+                    .and_then(|mapped| mapped.window.wl_surface())
                     .map(|surface| KeyboardFocus::Layout {
                         surface: Some(surface),
                     })
@@ -1158,7 +1158,7 @@ impl Niri {
         let is_tty = matches!(backend, Backend::Tty(_));
         let gamma_control_manager_state =
             GammaControlManagerState::new::<State, _>(&display_handle, move |client| {
-                is_tty && !client.get_data::<ClientState>().unwrap().restricted
+                is_tty && ClientState::unrestricted(client)
             });
 
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
@@ -2278,9 +2278,9 @@ impl Niri {
 
         for win in windows {
             self.layout.update_window(&win);
-            win.toplevel()
-                .expect("no X11 support")
-                .send_pending_configure();
+            if let Some(toplevel) = win.toplevel() {
+                toplevel.send_pending_configure();
+            }
         }
         for output in outputs {
             self.queue_redraw(&output);
@@ -3542,6 +3542,28 @@ impl Niri {
 
         if let Err(err) = res {
             warn!("error spawning a thread to send MonitorsChanged: {err:?}");
+        }
+    }
+
+    pub fn handle_focus_follows_mouse(&mut self, new_focus: &PointerFocus) {
+        if !self.config.borrow().input.focus_follows_mouse {
+            return;
+        }
+
+        if self.seat.get_pointer().unwrap().is_grabbed() {
+            return;
+        }
+
+        if let Some(output) = &new_focus.output {
+            if self.pointer_focus.output.as_ref() != Some(output) {
+                self.layout.focus_output(output);
+            }
+        }
+
+        if let Some(window) = &new_focus.window {
+            if self.pointer_focus.window.as_ref() != Some(window) {
+                self.layout.activate_window(window);
+            }
         }
     }
 }

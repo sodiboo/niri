@@ -138,7 +138,11 @@ impl XdgShellHandler for State {
                 }
 
                 let layout_focus = self.niri.layout.focus();
-                if Some(&root) != layout_focus.map(|win| win.wl_surface().unwrap()).as_ref() {
+                if Some(&root)
+                    != layout_focus
+                        .map(|mapped| mapped.window.wl_surface().unwrap())
+                        .as_ref()
+                {
                     let _ = PopupManager::dismiss_popup(&root, &popup);
                     return;
                 }
@@ -740,7 +744,11 @@ impl State {
         }
     }
 
-    pub fn update_window_rules(&mut self, toplevel: &ToplevelSurface) {
+    pub fn update_window_rules(&mut self, window: &Window) {
+        let Some(toplevel) = window.toplevel() else {
+            // TODO: handle xwayland windows
+            return;
+        };
         let config = self.niri.config.borrow();
         let window_rules = &config.window_rules;
 

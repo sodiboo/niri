@@ -1,6 +1,6 @@
 use niri_config::{BlockOutFrom, Match, WindowRule};
-use smithay::desktop::{Window, WindowSurface};
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::desktop::WindowSurface;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes};
@@ -13,6 +13,13 @@ pub use mapped::Mapped;
 
 pub mod unmapped;
 pub use unmapped::{InitialConfigureState, Unmapped};
+
+/// Reference to a mapped or unmapped window.
+#[derive(Debug, Clone, Copy)]
+pub enum WindowRef<'a> {
+    Unmapped(&'a Unmapped),
+    Mapped(&'a Mapped),
+}
 
 /// Rules fully resolved for a window.
 #[derive(Debug, PartialEq)]
@@ -55,10 +62,17 @@ pub struct ResolvedWindowRules {
 }
 
 impl<'a> WindowRef<'a> {
-    pub fn toplevel(self) -> &'a ToplevelSurface {
+    pub fn wl_surface(self) -> WlSurface {
         match self {
-            WindowRef::Unmapped(unmapped) => unmapped.toplevel(),
-            WindowRef::Mapped(mapped) => mapped.toplevel(),
+            WindowRef::Unmapped(unmapped) => unmapped.window.wl_surface().unwrap(),
+            WindowRef::Mapped(mapped) => mapped.window.wl_surface().unwrap(),
+        }
+    }
+
+    pub fn underlying_surface(self) -> &'a WindowSurface {
+        match self {
+            WindowRef::Unmapped(unmapped) => unmapped.window.underlying_surface(),
+            WindowRef::Mapped(mapped) => mapped.window.underlying_surface(),
         }
     }
 
@@ -66,6 +80,44 @@ impl<'a> WindowRef<'a> {
         match self {
             WindowRef::Unmapped(_) => false,
             WindowRef::Mapped(mapped) => mapped.is_focused(),
+        }
+    }
+}
+
+impl ResolvedWindowRules {
+    pub const fn empty() -> Self {
+        Self {
+            default_width: None,
+            open_on_output: None,
+            open_maximized: None,
+            open_fullscreen: None,
+            min_width: None,
+            min_height: None,
+            max_width: None,
+            max_height: None,
+            draw_border_with_background: None,
+            opacity: None,
+            block_out_from: None,
+        }
+    }
+
+    pub fn compute(rules: &[WindowRule], window: WindowRef) -> Self {
+        let _span = tracy_client::span!("ResolvedWindowRules::compute");
+
+        match window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => with_states(toplevel.wl_surface(), |states| {
+                let role = states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .unwrap()
+                    .lock()
+                    .unwrap();
+
+                resolve_window_rules_for_predicate(rules, |m| toplevel_window_matches(&role, m))
+            }),
+            WindowSurface::X11(surface) => {
+                resolve_window_rules_for_predicate(rules, |m| x11_window_matches(surface, m))
+            }
         }
     }
 }
@@ -123,6 +175,9 @@ fn resolve_window_rules_for_predicate(
         resolved.max_width = rule.max_width.or(resolved.max_width);
         resolved.max_height = rule.max_height.or(resolved.max_height);
 
+        resolved.opacity = rule.opacity.or(resolved.opacity);
+        resolved.block_out_from = rule.block_out_from.or(resolved.block_out_from);
+
         resolved.draw_border_with_background = rule
             .draw_border_with_background
             .or(resolved.draw_border_with_background);
@@ -131,98 +186,4 @@ fn resolve_window_rules_for_predicate(
     resolved.open_on_output = open_on_output.map(ToOwned::to_owned);
 
     resolved
-}
-
-impl ResolvedWindowRules {
-    pub const fn empty() -> Self {
-        Self {
-            default_width: None,
-            open_on_output: None,
-            open_maximized: None,
-            open_fullscreen: None,
-            min_width: None,
-            min_height: None,
-            max_width: None,
-            max_height: None,
-            draw_border_with_background: None,
-        }
-    }
-
-    pub fn compute(rules: &[WindowRule], window: WindowRef) -> Self {
-        let _span = tracy_client::span!("ResolvedWindowRules::compute");
-
-        match window.underlying_surface() {
-            WindowSurface::Wayland(toplevel) => with_states(toplevel.wl_surface(), |states| {
-                let role = states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .unwrap()
-                    .lock()
-                    .unwrap();
-
-                resolve_window_rules_for_predicate(rules, |m| toplevel_window_matches(&role, m))
-            }),
-            WindowSurface::X11(surface) => {
-                resolve_window_rules_for_predicate(rules, |m| x11_window_matches(surface, m))
-            }
-        };
-
-        let mut resolved = ResolvedWindowRules::empty();
-
-        let toplevel = window.toplevel();
-        with_states(&window.wl_surface().unwrap(), |states| {
-            let mut role = states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .unwrap()
-                .lock()
-                .unwrap();
-
-            let mut open_on_output = None;
-
-            for rule in rules {
-                if !(rule.matches.is_empty()
-                    || rule.matches.iter().any(|m| window_matches(&role, m)))
-                {
-                    continue;
-                }
-
-                if rule.excludes.iter().any(|m| window_matches(&role, m)) {
-                    continue;
-                }
-                if let Some(x) = rule.opacity {
-                    resolved.opacity = Some(x);
-                }
-                if let Some(x) = rule.block_out_from {
-                    resolved.block_out_from = Some(x);
-                }
-            }
-
-            resolved.open_on_output = open_on_output.map(|x| x.to_owned());
-        });
-
-        resolved
-    }
-}
-
-fn window_matches(role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
-    if let Some(app_id_re) = &m.app_id {
-        let Some(app_id) = &role.app_id else {
-            return false;
-        };
-        if !app_id_re.is_match(app_id) {
-            return false;
-        }
-    }
-
-    if let Some(title_re) = &m.title {
-        let Some(title) = &role.title else {
-            return false;
-        };
-        if !title_re.is_match(title) {
-            return false;
-        }
-    }
-
-    true
 }

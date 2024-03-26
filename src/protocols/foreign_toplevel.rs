@@ -12,6 +12,7 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{
     ToplevelStateSet, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
 };
@@ -118,22 +119,24 @@ pub fn refresh(state: &mut State) {
 
     // Finally, refresh the focused window.
     if let Some((window, output)) = focused {
-        with_states(window.wl_surface().unwrap(), |states| {
-            let role = states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .unwrap()
-                .lock()
-                .unwrap();
+        if let Some(toplevel) = window.toplevel() {
+            with_states(toplevel.wl_surface(), |states| {
+                let role = states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .unwrap()
+                    .lock()
+                    .unwrap();
 
-            refresh_toplevel(
-                protocol_state,
-                window.wl_surface(),
-                &role,
-                output.as_ref(),
-                true,
-            );
-        });
+                refresh_toplevel(
+                    protocol_state,
+                    toplevel.wl_surface(),
+                    &role,
+                    output.as_ref(),
+                    true,
+                );
+            });
+        }
     }
 }
 

@@ -59,8 +59,4 @@ impl Unmapped {
     pub fn needs_initial_configure(&self) -> bool {
         matches!(self.state, InitialConfigureState::NotConfigured { .. })
     }
-
-    pub fn toplevel(&self) -> &ToplevelSurface {
-        self.window.toplevel().expect("no X11 support")
-    }
 }

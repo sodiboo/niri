@@ -127,8 +127,10 @@ impl XwmHandler for State {
             return;
         };
 
-        self.niri.layout.remove_window(window.id());
-        self.niri.queue_redraw(output.clone());
+        let (window, output) = &(window.id().clone(), output.clone());
+
+        self.niri.layout.remove_window(window);
+        self.niri.queue_redraw(output);
     }
     fn configure_request(
         &mut self,
