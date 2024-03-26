@@ -1,8 +1,7 @@
-use niri_config::{Match, WindowRule};
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface,
     PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
-    WindowSurface, WindowSurfaceType,
+    WindowSurfaceType,
 };
 use smithay::input::pointer::Focus;
 use smithay::output::Output;
@@ -21,10 +20,9 @@ use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgPopupSurfaceData, XdgShellHandler,
-    XdgShellState, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
+    XdgShellState, XdgToplevelSurfaceData,
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
-use smithay::xwayland::X11Surface;
 use smithay::{
     delegate_kde_decoration, delegate_xdg_decoration, delegate_xdg_foreign, delegate_xdg_shell,
 };

@@ -1,6 +1,5 @@
 use smithay::desktop::Window;
 use smithay::output::Output;
-use smithay::wayland::shell::xdg::ToplevelSurface;
 
 use super::ResolvedWindowRules;
 use crate::layout::workspace::ColumnWidth;

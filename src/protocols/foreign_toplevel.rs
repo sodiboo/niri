@@ -12,7 +12,6 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::wayland::compositor::with_states;
-use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{
     ToplevelStateSet, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
 };

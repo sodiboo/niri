@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::cmp::{max, min};
 
 use niri_config::{BlockOutFrom, WindowRule};
-use smithay::backend::egl::surface;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements as _, Id, Kind};
 use smithay::desktop::space::SpaceElement as _;

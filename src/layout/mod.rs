@@ -38,21 +38,14 @@ use niri_config::{CenterFocusedColumn, Config, Struts};
 use niri_ipc::SizeChange;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
-use smithay::backend::renderer::element::{AsRenderElements, Id};
-use smithay::desktop::space::SpaceElement;
-use smithay::desktop::{Window, WindowSurface};
+use smithay::backend::renderer::element::Id;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
-use smithay::wayland::compositor::{send_surface_state, with_states};
-use smithay::wayland::seat::WaylandFocus;
-use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use self::monitor::Monitor;
 pub use self::monitor::MonitorRenderElement;
 use self::workspace::{compute_working_area, Column, ColumnWidth, OutputId, Workspace};
-use crate::handlers::xwayland::XUnwrap;
-use crate::niri::WindowOffscreenId;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::RenderTarget;
@@ -1781,7 +1774,6 @@ mod tests {
     use proptest::prelude::*;
     use proptest_derive::Arbitrary;
     use smithay::output::{Mode, PhysicalProperties, Subpixel};
-    use smithay::utils::Rectangle;
 
     use super::*;
 
