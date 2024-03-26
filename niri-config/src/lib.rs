@@ -97,8 +97,8 @@ pub struct Xkb {
     pub rules: String,
     #[knuffel(child, unwrap(argument), default)]
     pub model: String,
-    #[knuffel(child, unwrap(argument))]
-    pub layout: Option<String>,
+    #[knuffel(child, unwrap(argument), default)]
+    pub layout: String,
     #[knuffel(child, unwrap(argument), default)]
     pub variant: String,
     #[knuffel(child, unwrap(argument))]
@@ -110,7 +110,7 @@ impl Xkb {
         XkbConfig {
             rules: &self.rules,
             model: &self.model,
-            layout: self.layout.as_deref().unwrap_or("us"),
+            layout: &self.layout,
             variant: &self.variant,
             options: self.options.clone(),
         }
@@ -697,21 +697,38 @@ pub struct WindowRule {
 
     #[knuffel(child, unwrap(argument))]
     pub draw_border_with_background: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub opacity: Option<f32>,
+    #[knuffel(child, unwrap(argument))]
+    pub block_out_from: Option<BlockOutFrom>,
 }
 
+// Remember to update the PartialEq impl when adding fields!
 #[derive(knuffel::Decode, Debug, Default, Clone)]
 pub struct Match {
     #[knuffel(property, str)]
     pub app_id: Option<Regex>,
     #[knuffel(property, str)]
     pub title: Option<Regex>,
+    #[knuffel(property)]
+    pub is_active: Option<bool>,
+    #[knuffel(property)]
+    pub is_focused: Option<bool>,
 }
 
 impl PartialEq for Match {
     fn eq(&self, other: &Self) -> bool {
-        self.app_id.as_ref().map(Regex::as_str) == other.app_id.as_ref().map(Regex::as_str)
+        self.is_active == other.is_active
+            && self.is_focused == other.is_focused
+            && self.app_id.as_ref().map(Regex::as_str) == other.app_id.as_ref().map(Regex::as_str)
             && self.title.as_ref().map(Regex::as_str) == other.title.as_ref().map(Regex::as_str)
     }
+}
+
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockOutFrom {
+    Screencast,
+    ScreenCapture,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -733,10 +750,14 @@ pub struct Key {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Trigger {
     Keysym(Keysym),
-    WheelDown,
-    WheelUp,
-    WheelLeft,
-    WheelRight,
+    WheelScrollDown,
+    WheelScrollUp,
+    WheelScrollLeft,
+    WheelScrollRight,
+    TouchpadScrollDown,
+    TouchpadScrollUp,
+    TouchpadScrollLeft,
+    TouchpadScrollRight,
 }
 
 bitflags! {
@@ -746,7 +767,8 @@ bitflags! {
         const SHIFT = 2;
         const ALT = 4;
         const SUPER = 8;
-        const COMPOSITOR = 16;
+        const ISO_LEVEL3_SHIFT = 16;
+        const COMPOSITOR = 32;
     }
 }
 
@@ -901,6 +923,8 @@ impl From<niri_ipc::Action> for Action {
 
 #[derive(knuffel::Decode, Debug, Default, PartialEq)]
 pub struct DebugConfig {
+    #[knuffel(child, unwrap(argument))]
+    pub preview_render: Option<PreviewRender>,
     #[knuffel(child)]
     pub dbus_interfaces_in_non_session_instances: bool,
     #[knuffel(child)]
@@ -915,6 +939,12 @@ pub struct DebugConfig {
     pub render_drm_device: Option<PathBuf>,
     #[knuffel(child)]
     pub emulate_zero_presentation_time: bool,
+}
+
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewRender {
+    Screencast,
+    ScreenCapture,
 }
 
 impl Config {
@@ -1542,19 +1572,31 @@ impl FromStr for Key {
                 modifiers |= Modifiers::ALT;
             } else if part.eq_ignore_ascii_case("super") || part.eq_ignore_ascii_case("win") {
                 modifiers |= Modifiers::SUPER;
+            } else if part.eq_ignore_ascii_case("iso_level3_shift")
+                || part.eq_ignore_ascii_case("mod5")
+            {
+                modifiers |= Modifiers::ISO_LEVEL3_SHIFT;
             } else {
                 return Err(miette!("invalid modifier: {part}"));
             }
         }
 
-        let trigger = if key.eq_ignore_ascii_case("WheelDown") {
-            Trigger::WheelDown
-        } else if key.eq_ignore_ascii_case("WheelUp") {
-            Trigger::WheelUp
-        } else if key.eq_ignore_ascii_case("WheelLeft") {
-            Trigger::WheelLeft
-        } else if key.eq_ignore_ascii_case("WheelRight") {
-            Trigger::WheelRight
+        let trigger = if key.eq_ignore_ascii_case("WheelScrollDown") {
+            Trigger::WheelScrollDown
+        } else if key.eq_ignore_ascii_case("WheelScrollUp") {
+            Trigger::WheelScrollUp
+        } else if key.eq_ignore_ascii_case("WheelScrollLeft") {
+            Trigger::WheelScrollLeft
+        } else if key.eq_ignore_ascii_case("WheelScrollRight") {
+            Trigger::WheelScrollRight
+        } else if key.eq_ignore_ascii_case("TouchpadScrollDown") {
+            Trigger::TouchpadScrollDown
+        } else if key.eq_ignore_ascii_case("TouchpadScrollUp") {
+            Trigger::TouchpadScrollUp
+        } else if key.eq_ignore_ascii_case("TouchpadScrollLeft") {
+            Trigger::TouchpadScrollLeft
+        } else if key.eq_ignore_ascii_case("TouchpadScrollRight") {
+            Trigger::TouchpadScrollRight
         } else {
             let keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
             if keysym.raw() == KEY_NoSymbol {
@@ -1757,6 +1799,7 @@ mod tests {
             window-rule {
                 match app-id=".*alacritty"
                 exclude title="~"
+                exclude is-active=true is-focused=false
 
                 open-on-output "eDP-1"
                 open-maximized true
@@ -1771,7 +1814,7 @@ mod tests {
                 Mod+Comma { consume-window-into-column; }
                 Mod+1 { focus-workspace 1; }
                 Mod+Shift+E { quit skip-confirmation=true; }
-                Mod+WheelDown cooldown-ms=150 { focus-workspace-down; }
+                Mod+WheelScrollDown cooldown-ms=150 { focus-workspace-down; }
             }
 
             debug {
@@ -1782,7 +1825,7 @@ mod tests {
                 input: Input {
                     keyboard: Keyboard {
                         xkb: Xkb {
-                            layout: Some("us,ru".to_owned()),
+                            layout: "us,ru".to_owned(),
                             options: Some("grp:win_space_toggle".to_owned()),
                             ..Default::default()
                         },
@@ -1942,11 +1985,23 @@ mod tests {
                     matches: vec![Match {
                         app_id: Some(Regex::new(".*alacritty").unwrap()),
                         title: None,
+                        is_active: None,
+                        is_focused: None,
                     }],
-                    excludes: vec![Match {
-                        app_id: None,
-                        title: Some(Regex::new("~").unwrap()),
-                    }],
+                    excludes: vec![
+                        Match {
+                            app_id: None,
+                            title: Some(Regex::new("~").unwrap()),
+                            is_active: None,
+                            is_focused: None,
+                        },
+                        Match {
+                            app_id: None,
+                            title: None,
+                            is_active: Some(true),
+                            is_focused: Some(false),
+                        },
+                    ],
                     open_on_output: Some("eDP-1".to_owned()),
                     open_maximized: Some(true),
                     open_fullscreen: Some(false),
@@ -2011,7 +2066,7 @@ mod tests {
                     },
                     Bind {
                         key: Key {
-                            trigger: Trigger::WheelDown,
+                            trigger: Trigger::WheelScrollDown,
                             modifiers: Modifiers::COMPOSITOR,
                         },
                         action: Action::FocusWorkspaceDown,
@@ -2086,5 +2141,23 @@ mod tests {
 
         assert!("-".parse::<SizeChange>().is_err());
         assert!("10% ".parse::<SizeChange>().is_err());
+    }
+
+    #[test]
+    fn parse_iso_level3_shift() {
+        assert_eq!(
+            "ISO_Level3_Shift+A".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::a),
+                modifiers: Modifiers::ISO_LEVEL3_SHIFT
+            },
+        );
+        assert_eq!(
+            "Mod5+A".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::a),
+                modifiers: Modifiers::ISO_LEVEL3_SHIFT
+            },
+        );
     }
 }

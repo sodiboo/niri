@@ -55,6 +55,7 @@ use crate::handlers::xwayland::XUnwrap;
 use crate::niri::WindowOffscreenId;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::RenderTarget;
 use crate::utils::output_size;
 use crate::window::ResolvedWindowRules;
 
@@ -102,6 +103,8 @@ pub trait LayoutElement {
         renderer: &mut R,
         location: Point<i32, Logical>,
         scale: Scale<f64>,
+        alpha: f32,
+        target: RenderTarget,
     ) -> Vec<LayoutElementRenderElement<R>>;
 
     fn request_configure(&self, rect: Rectangle<i32, Logical>);
@@ -115,7 +118,7 @@ pub trait LayoutElement {
     fn output_enter(&self, output: &Output);
     fn output_leave(&self, output: &Output);
     fn set_offscreen_element_id(&self, id: Option<Id>);
-    fn set_activated(&self, active: bool);
+    fn set_activated(&mut self, active: bool);
     fn set_bounds(&self, bounds: Size<i32, Logical>);
 
     fn send_pending_configure(&self);
@@ -1867,6 +1870,8 @@ mod tests {
             _renderer: &mut R,
             _location: Point<i32, Logical>,
             _scale: Scale<f64>,
+            _alpha: f32,
+            _target: RenderTarget,
         ) -> Vec<LayoutElementRenderElement<R>> {
             vec![]
         }
@@ -1908,7 +1913,7 @@ mod tests {
 
         fn set_offscreen_element_id(&self, _id: Option<Id>) {}
 
-        fn set_activated(&self, _active: bool) {}
+        fn set_activated(&mut self, _active: bool) {}
 
         fn set_bounds(&self, _bounds: Size<i32, Logical>) {}
 

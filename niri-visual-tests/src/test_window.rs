@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use niri::layout::{LayoutElement, LayoutElementRenderElement};
 use niri::render_helpers::renderer::NiriRenderer;
+use niri::render_helpers::RenderTarget;
 use niri::window::ResolvedWindowRules;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
 use smithay::backend::renderer::element::{Id, Kind};
@@ -146,6 +147,8 @@ impl LayoutElement for TestWindow {
         _renderer: &mut R,
         location: Point<i32, Logical>,
         scale: Scale<f64>,
+        alpha: f32,
+        _target: RenderTarget,
     ) -> Vec<LayoutElementRenderElement<R>> {
         let inner = self.inner.borrow();
 
@@ -154,7 +157,7 @@ impl LayoutElement for TestWindow {
                 &inner.buffer,
                 location.to_physical_precise_round(scale),
                 scale,
-                1.,
+                alpha,
                 Kind::Unspecified,
             )
             .into(),
@@ -163,7 +166,7 @@ impl LayoutElement for TestWindow {
                 (location - Point::from((inner.csd_shadow_width, inner.csd_shadow_width)))
                     .to_physical_precise_round(scale),
                 scale,
-                1.,
+                alpha,
                 Kind::Unspecified,
             )
             .into(),
@@ -203,7 +206,7 @@ impl LayoutElement for TestWindow {
 
     fn set_offscreen_element_id(&self, _id: Option<Id>) {}
 
-    fn set_activated(&self, _active: bool) {}
+    fn set_activated(&mut self, _active: bool) {}
 
     fn set_bounds(&self, _bounds: Size<i32, Logical>) {}
 

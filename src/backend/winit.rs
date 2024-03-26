@@ -19,7 +19,7 @@ use smithay::reexports::winit::window::WindowBuilder;
 
 use super::RenderResult;
 use crate::niri::{Niri, RedrawState, State};
-use crate::render_helpers::shaders;
+use crate::render_helpers::{shaders, RenderTarget};
 use crate::utils::get_monotonic_time;
 
 pub struct Winit {
@@ -104,13 +104,11 @@ impl Winit {
                     mode.width = size.w.clamp(0, u16::MAX as i32) as u16;
                     mode.height = size.h.clamp(0, u16::MAX as i32) as u16;
 
-                    state.niri.output_resized(winit.output.clone());
+                    state.niri.output_resized(&winit.output);
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Focus(_) => (),
-                WinitEvent::Redraw => state
-                    .niri
-                    .queue_redraw(state.backend.winit().output.clone()),
+                WinitEvent::Redraw => state.niri.queue_redraw(&state.backend.winit().output),
                 WinitEvent::CloseRequested => state.niri.stop_signal.stop(),
             })
             .unwrap();
@@ -151,7 +149,12 @@ impl Winit {
         let _span = tracy_client::span!("Winit::render");
 
         // Render the elements.
-        let elements = niri.render::<GlesRenderer>(self.backend.renderer(), output, true);
+        let elements = niri.render::<GlesRenderer>(
+            self.backend.renderer(),
+            output,
+            true,
+            RenderTarget::Output,
+        );
 
         // Hand them over to winit.
         self.backend.bind().unwrap();
@@ -195,7 +198,7 @@ impl Winit {
         let output_state = niri.output_state.get_mut(output).unwrap();
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
             RedrawState::Idle => unreachable!(),
-            RedrawState::Queued(_) => (),
+            RedrawState::Queued => (),
             RedrawState::WaitingForVBlank { .. } => unreachable!(),
             RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
             RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),

@@ -364,6 +364,17 @@ animations {
     // Raw KDL strings are helpful here.
     exclude app-id=r#"\.unwanted\."#
 
+    // One more way to match is by whether the window is active
+    // (same as when it uses the active border color).
+    match is-active=true
+
+    // Another way to match is by whether the window has keyboard focus.
+    // This is different from is-active: every workspace on a monitor
+    // has one active window, but only one window can have a keyboard
+    // focus. Also, the keyboard focus can go to a layer-shell surface,
+    // then no window will have the keyboard focus.
+    match is-focused=true
+
     // Here are the properties that you can set on a window rule.
     // These properties apply once, when a window first opens.
 
@@ -385,6 +396,29 @@ animations {
 
     // The following properties apply dynamically while a window is open.
 
+    // You can block out windows from xdg-desktop-portal screencasts.
+    // They will be replaced with solid black rectangles.
+    // This can be useful for password managers or messenger windows, etc.
+    // To preview and set up this rule, check the preview-render option
+    // in the debug section of the config.
+    //
+    // WARNING: the window is NOT blocked out from third-party screenshot tools.
+    // If you open some screenshot tool with preview while screencasting,
+    // blocked out windows WILL BE VISIBLE on the screencast.
+    //
+    // The built-in screenshot UI is not affected though, you can use it safely,
+    // and windows will remain blocked out even when screencasting it.
+    block-out-from "screencast"
+
+    // You can also block out the window out of all screen captures, including
+    // third-party screenshot tools. This way you avoid accidentally showing
+    // the window on a screencast when opening a third-party screenshot preview.
+    //
+    // This setting will still let you use the interactive built-in screenshot UI,
+    // but it will block out the window from the fully automatic screenshot actions,
+    // such as screenshot-screen and screenshot-window.
+    block-out-from "screen-capture"
+
     // You can amend the window's minimum and maximum size in logical pixels.
     // Keep in mind that the window itself always has a final say in its size.
     // These values instruct niri to never ask the window to be smaller than
@@ -403,6 +437,16 @@ animations {
     // Set this to `false` to draw them as borders around the window even for
     // windows which use client-side decorations.
     draw-border-with-background false
+
+    // Set the opacity of the window.
+    // This is applied on top of the window's own opacity, so semitransparent
+    // windows will become even more transparent.
+    // Opacity is applied to every surface of the window individually, so
+    // subsurfaces and pop-up menus will show window content behind them.
+    // Also, focus ring and border with background will show through
+    // semitransparent windows (see prefer-no-csd and
+    // the draw-border-with-background property above).
+    opacity 0.5
 }
 
 // Here's a useful example. Work around WezTerm's initial configure bug
@@ -414,6 +458,18 @@ window-rule {
     // The regular expression can match anywhere in the string.
     match app-id=r#"^org\.wezfurlong\.wezterm$"#
     default-column-width {}
+}
+
+// Another example: block out two password managers from screen capture.
+// (This example rule is commented out with a "/-" in front.)
+/-window-rule {
+    match app-id=r#"^org\.keepassxc\.KeePassXC$"#
+    match app-id=r#"^org\.gnome\.World\.Secrets$"#
+
+    block-out-from "screen-capture"
+
+    // Use this instead if you want them visible on third-party screenshot tools.
+    // block-out-from "screencast"
 }
 
 binds {
@@ -520,25 +576,36 @@ binds {
     Mod+Shift+I         { move-workspace-up; }
 
     // You can bind mouse wheel scroll ticks using the following syntax.
+    // These binds will change direction based on the natural-scroll setting.
+    //
     // To avoid scrolling through workspaces really fast, you can use
     // the cooldown-ms property. The bind will be rate-limited to this value.
     // You can set a cooldown on any bind, but it's most useful for the wheel.
-    Mod+WheelDown      cooldown-ms=150 { focus-workspace-down; }
-    Mod+WheelUp        cooldown-ms=150 { focus-workspace-up; }
-    Mod+Ctrl+WheelDown cooldown-ms=150 { move-column-to-workspace-down; }
-    Mod+Ctrl+WheelUp   cooldown-ms=150 { move-column-to-workspace-up; }
+    Mod+WheelScrollDown      cooldown-ms=150 { focus-workspace-down; }
+    Mod+WheelScrollUp        cooldown-ms=150 { focus-workspace-up; }
+    Mod+Ctrl+WheelScrollDown cooldown-ms=150 { move-column-to-workspace-down; }
+    Mod+Ctrl+WheelScrollUp   cooldown-ms=150 { move-column-to-workspace-up; }
 
-    Mod+WheelRight      { focus-column-right; }
-    Mod+WheelLeft       { focus-column-left; }
-    Mod+Ctrl+WheelRight { move-column-right; }
-    Mod+Ctrl+WheelLeft  { move-column-left; }
+    Mod+WheelScrollRight      { focus-column-right; }
+    Mod+WheelScrollLeft       { focus-column-left; }
+    Mod+Ctrl+WheelScrollRight { move-column-right; }
+    Mod+Ctrl+WheelScrollLeft  { move-column-left; }
 
     // Usually scrolling up and down with Shift in applications results in
     // horizontal scrolling; these binds replicate that.
-    Mod+Shift+WheelDown      { focus-column-right; }
-    Mod+Shift+WheelUp        { focus-column-left; }
-    Mod+Ctrl+Shift+WheelDown { move-column-right; }
-    Mod+Ctrl+Shift+WheelUp   { move-column-left; }
+    Mod+Shift+WheelScrollDown      { focus-column-right; }
+    Mod+Shift+WheelScrollUp        { focus-column-left; }
+    Mod+Ctrl+Shift+WheelScrollDown { move-column-right; }
+    Mod+Ctrl+Shift+WheelScrollUp   { move-column-left; }
+
+    // Similarly, you can bind touchpad scroll "ticks".
+    // Touchpad scrolling is continuous, so for these binds it is split into
+    // discrete intervals.
+    // These binds are also affected by touchpad's natural-scroll, so these
+    // example binds are "inverted", since we have natural-scroll enabled for
+    // touchpads by default.
+    // Mod+TouchpadScrollDown { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.02+"; }
+    // Mod+TouchpadScrollUp   { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "0.02-"; }
 
     // You can refer to workspaces by index. However, keep in mind that
     // niri is a dynamic workspace system, so these commands are kind of
@@ -630,6 +697,11 @@ binds {
 // Settings for debugging. Not meant for normal use.
 // These can change or stop working at any point with little notice.
 debug {
+    // Render the monitors as if for a screencast or a screen capture.
+    // Useful for previewing the block-out-from window rule.
+    // preview-render "screencast"
+    // preview-render "screen-capture"
+
     // Make niri take over its DBus services even if it's not running as a session.
     // Useful for testing screen recording changes without having to relogin.
     // The main niri instance will *not* currently take back the services; so you will

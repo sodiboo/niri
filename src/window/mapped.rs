@@ -1,6 +1,9 @@
+use std::cell::RefCell;
 use std::cmp::{max, min};
 
-use smithay::backend::renderer::element::{AsRenderElements as _, Id};
+use niri_config::{BlockOutFrom, WindowRule};
+use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
+use smithay::backend::renderer::element::{AsRenderElements as _, Id, Kind};
 use smithay::desktop::space::SpaceElement as _;
 use smithay::desktop::{Window, WindowSurface};
 use smithay::output::Output;
@@ -12,23 +15,76 @@ use smithay::wayland::compositor::{send_surface_state, with_states};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::ResolvedWindowRules;
+use super::{ResolvedWindowRules, WindowRef};
 use crate::handlers::xwayland::XUnwrap;
 use crate::layout::LayoutElementRenderElement;
 use crate::niri::WindowOffscreenId;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::RenderTarget;
 
 #[derive(Debug)]
 pub struct Mapped {
     pub window: Window,
 
     /// Up-to-date rules.
-    pub rules: ResolvedWindowRules,
+    rules: ResolvedWindowRules,
+
+    /// Whether the window rules need to be recomputed.
+    ///
+    /// This is not used in all cases; for example, app ID and title changes recompute the rules
+    /// immediately, rather than setting this flag.
+    need_to_recompute_rules: bool,
+
+    /// Whether this window has the keyboard focus.
+    is_focused: bool,
+
+    /// Buffer to draw instead of the window when it should be blocked out.
+    block_out_buffer: RefCell<SolidColorBuffer>,
 }
 
 impl Mapped {
     pub fn new(window: Window, rules: ResolvedWindowRules) -> Self {
-        Self { window, rules }
+        Self {
+            window,
+            rules,
+            need_to_recompute_rules: false,
+            is_focused: false,
+            block_out_buffer: RefCell::new(SolidColorBuffer::new((0, 0), [0., 0., 0., 1.])),
+        }
+    }
+
+    /// Recomputes the resolved window rules and returns whether they changed.
+    pub fn recompute_window_rules(&mut self, rules: &[WindowRule]) -> bool {
+        self.need_to_recompute_rules = false;
+
+        let new_rules = ResolvedWindowRules::compute(rules, WindowRef::Mapped(self));
+        if new_rules == self.rules {
+            return false;
+        }
+
+        self.rules = new_rules;
+        true
+    }
+
+    pub fn recompute_window_rules_if_needed(&mut self, rules: &[WindowRule]) -> bool {
+        if !self.need_to_recompute_rules {
+            return false;
+        }
+
+        self.recompute_window_rules(rules)
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.is_focused
+    }
+
+    pub fn set_is_focused(&mut self, is_focused: bool) {
+        if self.is_focused == is_focused {
+            return;
+        }
+
+        self.is_focused = is_focused;
+        self.need_to_recompute_rules = true;
     }
 }
 
@@ -57,14 +113,35 @@ impl crate::layout::LayoutElement for Mapped {
         renderer: &mut R,
         location: Point<i32, Logical>,
         scale: Scale<f64>,
+        alpha: f32,
+        target: RenderTarget,
     ) -> Vec<LayoutElementRenderElement<R>> {
-        let buf_pos = location - self.window.geometry().loc;
-        self.window.render_elements(
-            renderer,
-            buf_pos.to_physical_precise_round(scale),
-            scale,
-            1.,
-        )
+        let block_out = match self.rules.block_out_from {
+            None => false,
+            Some(BlockOutFrom::Screencast) => target == RenderTarget::Screencast,
+            Some(BlockOutFrom::ScreenCapture) => target != RenderTarget::Output,
+        };
+
+        if block_out {
+            let mut buffer = self.block_out_buffer.borrow_mut();
+            buffer.resize(self.window.geometry().size);
+            let elem = SolidColorRenderElement::from_buffer(
+                &buffer,
+                location.to_physical_precise_round(scale),
+                scale,
+                alpha,
+                Kind::Unspecified,
+            );
+            vec![elem.into()]
+        } else {
+            let buf_pos = location - self.window.geometry().loc;
+            self.window.render_elements(
+                renderer,
+                buf_pos.to_physical_precise_round(scale),
+                scale,
+                alpha,
+            )
+        }
     }
 
     fn request_configure(&self, rect: Rectangle<i32, Logical>) {
@@ -182,8 +259,15 @@ impl crate::layout::LayoutElement for Mapped {
         data.0.replace(id);
     }
 
-    fn set_activated(&self, active: bool) {
-        self.window.set_activated(active);
+    fn set_activated(&mut self, active: bool) {
+        let changed = self.toplevel().with_pending_state(|state| {
+            if active {
+                state.states.set(xdg_toplevel::State::Activated)
+            } else {
+                state.states.unset(xdg_toplevel::State::Activated)
+            }
+        });
+        self.need_to_recompute_rules |= changed;
     }
 
     fn set_bounds(&self, bounds: Size<i32, Logical>) {

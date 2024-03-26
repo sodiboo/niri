@@ -11,7 +11,7 @@ use std::{env, iter, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{ensure, Context};
 use calloop::futures::Scheduler;
-use niri_config::{Config, Key, TrackLayout};
+use niri_config::{Config, Key, Modifiers, PreviewRender, TrackLayout};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
@@ -22,8 +22,8 @@ use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, Relocate, RelocateRenderElement,
 };
 use smithay::backend::renderer::element::{
-    default_primary_scanout_output_compare, AsRenderElements, Id, Kind, PrimaryScanoutOutput,
-    RenderElementStates,
+    default_primary_scanout_output_compare, AsRenderElements, Element as _, Id, Kind,
+    PrimaryScanoutOutput, RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::utils::{
@@ -43,7 +43,7 @@ use smithay::output::{self, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{
-    Idle, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
+    Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
 };
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::WmCapabilities;
@@ -99,15 +99,18 @@ use crate::dbus::gnome_shell_screenshot::{NiriToScreenshot, ScreenshotToNiri};
 use crate::dbus::mutter_screen_cast::{self, ScreenCastToNiri};
 use crate::frame_clock::FrameClock;
 use crate::handlers::configure_lock_surface;
-use crate::input::{apply_libinput_settings, TabletData};
+use crate::input::{
+    apply_libinput_settings, mods_with_finger_scroll_binds, mods_with_wheel_binds, TabletData,
+};
 use crate::ipc::server::IpcServer;
-use crate::layout::{Layout, MonitorRenderElement};
+use crate::layout::{Layout, LayoutElement as _, MonitorRenderElement};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyManagerState};
 use crate::pw_utils::{Cast, PipeWire};
 use crate::render_helpers::renderer::NiriRenderer;
-use crate::render_helpers::{render_to_shm, render_to_texture, render_to_vec};
+use crate::render_helpers::{render_to_shm, render_to_texture, render_to_vec, RenderTarget};
+use crate::scroll_tracker::ScrollTracker;
 use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::ExitConfirmDialog;
 use crate::ui::hotkey_overlay::HotkeyOverlay;
@@ -116,8 +119,7 @@ use crate::utils::spawning::CHILD_ENV;
 use crate::utils::{
     center, center_f64, get_monotonic_time, make_screenshot_path, output_size, write_png_rgba8,
 };
-use crate::wheel_tracker::WheelTracker;
-use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped};
+use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
 use crate::{animation, niri_render_elements};
 
 const CLEAR_COLOR: [f32; 4] = [0.2, 0.2, 0.2, 1.];
@@ -208,8 +210,12 @@ pub struct Niri {
     pub pointer_focus: PointerFocus,
     pub tablet_cursor_location: Option<Point<f64, Logical>>,
     pub gesture_swipe_3f_cumulative: Option<(f64, f64)>,
-    pub vertical_wheel_tracker: WheelTracker,
-    pub horizontal_wheel_tracker: WheelTracker,
+    pub vertical_wheel_tracker: ScrollTracker,
+    pub horizontal_wheel_tracker: ScrollTracker,
+    pub mods_with_wheel_binds: HashSet<Modifiers>,
+    pub vertical_finger_scroll_tracker: ScrollTracker,
+    pub horizontal_finger_scroll_tracker: ScrollTracker,
+    pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
 
     pub lock_state: LockState,
 
@@ -277,13 +283,13 @@ pub enum RedrawState {
     #[default]
     Idle,
     /// A redraw is queued.
-    Queued(Idle<'static>),
+    Queued,
     /// We submitted a frame to the KMS and waiting for it to be presented.
     WaitingForVBlank { redraw_needed: bool },
     /// We did not submit anything to KMS and made a timer to fire at the estimated VBlank.
     WaitingForEstimatedVBlank(RegistrationToken),
     /// A redraw is queued on top of the above.
-    WaitingForEstimatedVBlankAndQueued((RegistrationToken, Idle<'static>)),
+    WaitingForEstimatedVBlankAndQueued(RegistrationToken),
 }
 
 pub struct PopupGrabState {
@@ -344,6 +350,27 @@ pub enum CenterCoords {
 
 #[derive(Default)]
 pub struct WindowOffscreenId(pub RefCell<Option<Id>>);
+
+impl RedrawState {
+    fn queue_redraw(self) -> Self {
+        match self {
+            RedrawState::Idle => RedrawState::Queued,
+            RedrawState::WaitingForEstimatedVBlank(token) => {
+                RedrawState::WaitingForEstimatedVBlankAndQueued(token)
+            }
+
+            // A redraw is already queued.
+            value @ (RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)) => {
+                value
+            }
+
+            // We're waiting for VBlank, request a redraw afterwards.
+            RedrawState::WaitingForVBlank { .. } => RedrawState::WaitingForVBlank {
+                redraw_needed: true,
+            },
+        }
+    }
+}
 
 impl Default for SurfaceFrameThrottlingState {
     fn default() -> Self {
@@ -421,7 +448,20 @@ impl State {
     }
 
     pub fn refresh_and_flush_clients(&mut self) {
-        let _span = tracy_client::span!("refresh_and_flush_clients");
+        let _span = tracy_client::span!("State::refresh_and_flush_clients");
+
+        self.refresh();
+
+        self.niri.redraw_queued_outputs(&mut self.backend);
+
+        {
+            let _span = tracy_client::span!("flush_clients");
+            self.niri.display_handle.flush_clients().unwrap();
+        }
+    }
+
+    fn refresh(&mut self) {
+        let _span = tracy_client::span!("State::refresh");
 
         // These should be called periodically, before flushing the clients.
         self.niri.layout.refresh();
@@ -433,11 +473,7 @@ impl State {
         self.update_keyboard_focus();
         self.refresh_pointer_focus();
         foreign_toplevel::refresh(self);
-
-        {
-            let _span = tracy_client::span!("flush_clients");
-            self.niri.display_handle.flush_clients().unwrap();
-        }
+        self.niri.refresh_window_rules();
     }
 
     pub fn move_cursor(&mut self, location: Point<f64, Logical>) {
@@ -692,6 +728,24 @@ impl State {
                 focus
             );
 
+            // Tell the windows their new focus state for window rule purposes.
+            if let KeyboardFocus::Layout {
+                surface: Some(surface),
+            } = &self.niri.keyboard_focus
+            {
+                if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
+                    mapped.set_is_focused(false);
+                }
+            }
+            if let KeyboardFocus::Layout {
+                surface: Some(surface),
+            } = &focus
+            {
+                if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
+                    mapped.set_is_focused(true);
+                }
+            }
+
             if let Some(grab) = self.niri.popup_grab.as_mut() {
                 if Some(&grab.root) != focus.surface() {
                     trace!(
@@ -821,6 +875,10 @@ impl State {
 
         if config.binds != old_config.binds {
             self.niri.hotkey_overlay.on_hotkey_config_updated();
+            self.niri.mods_with_wheel_binds =
+                mods_with_wheel_binds(self.backend.mod_key(), &config.binds);
+            self.niri.mods_with_finger_scroll_binds =
+                mods_with_finger_scroll_binds(self.backend.mod_key(), &config.binds);
         }
 
         if config.window_rules != old_config.window_rules {
@@ -878,7 +936,7 @@ impl State {
                 }
             }
             for output in resized_outputs {
-                self.niri.output_resized(output);
+                self.niri.output_resized(&output);
             }
 
             self.backend.on_output_config_changed(&mut self.niri);
@@ -896,18 +954,18 @@ impl State {
             let window_rules = &self.niri.config.borrow().window_rules;
 
             for unmapped in self.niri.unmapped_windows.values_mut() {
+                let new_rules =
+                    ResolvedWindowRules::compute(window_rules, WindowRef::Unmapped(unmapped));
                 if let InitialConfigureState::Configured { rules, .. } = &mut unmapped.state {
-                    *rules = ResolvedWindowRules::compute(
-                        window_rules,
-                        unmapped.window.toplevel().expect("no X11 support"),
-                    );
+                    *rules = new_rules;
                 }
             }
 
             let mut windows = vec![];
             self.niri.layout.with_windows_mut(|mapped, _| {
-                mapped.rules = ResolvedWindowRules::compute(window_rules, mapped.toplevel());
-                windows.push(mapped.window.clone());
+                if mapped.recompute_window_rules(window_rules) {
+                    windows.push(mapped.window.clone());
+                }
             });
             for win in windows {
                 self.niri.layout.update_window(&win);
@@ -970,7 +1028,7 @@ impl State {
                 }
             }
             ScreenCastToNiri::StopCast { session_id } => self.niri.stop_cast(session_id),
-            ScreenCastToNiri::Redraw(output) => self.niri.queue_redraw(output),
+            ScreenCastToNiri::Redraw(output) => self.niri.queue_redraw(&output),
         }
     }
 
@@ -1115,6 +1173,10 @@ impl Niri {
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
             CursorManager::new(&config_.cursor.xcursor_theme, config_.cursor.xcursor_size);
+
+        let mods_with_wheel_binds = mods_with_wheel_binds(backend.mod_key(), &config_.binds);
+        let mods_with_finger_scroll_binds =
+            mods_with_finger_scroll_binds(backend.mod_key(), &config_.binds);
 
         let (tx, rx) = calloop::channel::channel();
         event_loop
@@ -1325,8 +1387,14 @@ impl Niri {
             pointer_focus: PointerFocus::default(),
             tablet_cursor_location: None,
             gesture_swipe_3f_cumulative: None,
-            vertical_wheel_tracker: WheelTracker::new(),
-            horizontal_wheel_tracker: WheelTracker::new(),
+            vertical_wheel_tracker: ScrollTracker::new(120),
+            horizontal_wheel_tracker: ScrollTracker::new(120),
+            mods_with_wheel_binds,
+
+            // 10 is copied from Clutter: DISCRETE_SCROLL_STEP.
+            vertical_finger_scroll_tracker: ScrollTracker::new(10),
+            horizontal_finger_scroll_tracker: ScrollTracker::new(10),
+            mods_with_finger_scroll_binds,
 
             lock_state: LockState::Unlocked,
 
@@ -1484,7 +1552,7 @@ impl Niri {
                     new_position.x, new_position.y
                 );
                 output.change_current_state(None, None, None, Some(new_position));
-                self.queue_redraw(output);
+                self.queue_redraw(&output);
             }
         }
     }
@@ -1559,13 +1627,10 @@ impl Niri {
 
         match state.redraw_state {
             RedrawState::Idle => (),
-            RedrawState::Queued(idle) => idle.cancel(),
+            RedrawState::Queued => (),
             RedrawState::WaitingForVBlank { .. } => (),
             RedrawState::WaitingForEstimatedVBlank(token) => self.event_loop.remove(token),
-            RedrawState::WaitingForEstimatedVBlankAndQueued((token, idle)) => {
-                self.event_loop.remove(token);
-                idle.cancel();
-            }
+            RedrawState::WaitingForEstimatedVBlankAndQueued(token) => self.event_loop.remove(token),
         }
 
         // Disable the output global and remove some time later to give the clients some time to
@@ -1612,27 +1677,26 @@ impl Niri {
         }
     }
 
-    pub fn output_resized(&mut self, output: Output) {
-        let output_size = output_size(&output);
+    pub fn output_resized(&mut self, output: &Output) {
+        let output_size = output_size(output);
         let is_locked = self.is_locked();
 
-        layer_map_for_output(&output).arrange();
-        self.layout.update_output_size(&output);
+        layer_map_for_output(output).arrange();
+        self.layout.update_output_size(output);
 
-        if let Some(state) = self.output_state.get_mut(&output) {
+        if let Some(state) = self.output_state.get_mut(output) {
             state.background_buffer.resize(output_size);
 
             state.lock_color_buffer.resize(output_size);
             if is_locked {
                 if let Some(lock_surface) = &state.lock_surface {
-                    configure_lock_surface(lock_surface, &output);
+                    configure_lock_surface(lock_surface, output);
                 }
             }
         }
 
         // If the output size changed with an open screenshot UI, close the screenshot UI.
-        if let Some((old_size, old_scale, old_transform)) = self.screenshot_ui.output_size(&output)
-        {
+        if let Some((old_size, old_scale, old_transform)) = self.screenshot_ui.output_size(output) {
             let transform = output.current_transform();
             let output_mode = output.current_mode().unwrap();
             let size = transform.transform_size(output_mode.size);
@@ -1943,43 +2007,29 @@ impl Niri {
 
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
     pub fn queue_redraw_all(&mut self) {
-        let outputs: Vec<_> = self.output_state.keys().cloned().collect();
-        for output in outputs {
-            self.queue_redraw(output);
+        for state in self.output_state.values_mut() {
+            state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
         }
     }
 
     /// Schedules an immediate redraw if one is not already scheduled.
-    pub fn queue_redraw(&mut self, output: Output) {
-        let state = self.output_state.get_mut(&output).unwrap();
-        let token = match mem::take(&mut state.redraw_state) {
-            RedrawState::Idle => None,
-            RedrawState::WaitingForEstimatedVBlank(token) => Some(token),
+    pub fn queue_redraw(&mut self, output: &Output) {
+        let state = self.output_state.get_mut(output).unwrap();
+        state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
+    }
 
-            // A redraw is already queued, put it back and do nothing.
-            value @ (RedrawState::Queued(_)
-            | RedrawState::WaitingForEstimatedVBlankAndQueued(_)) => {
-                state.redraw_state = value;
-                return;
-            }
+    pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
+        let _span = tracy_client::span!("Niri::redraw_queued_outputs");
 
-            // We're waiting for VBlank, request a redraw afterwards.
-            RedrawState::WaitingForVBlank { .. } => {
-                state.redraw_state = RedrawState::WaitingForVBlank {
-                    redraw_needed: true,
-                };
-                return;
-            }
-        };
-
-        let idle = self.event_loop.insert_idle(move |state| {
-            state.niri.redraw(&mut state.backend, &output);
-        });
-
-        state.redraw_state = match token {
-            Some(token) => RedrawState::WaitingForEstimatedVBlankAndQueued((token, idle)),
-            None => RedrawState::Queued(idle),
-        };
+        while let Some((output, _)) = self.output_state.iter().find(|(_, state)| {
+            matches!(
+                state.redraw_state,
+                RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+            )
+        }) {
+            let output = output.clone();
+            self.redraw(backend, &output);
+        }
     }
 
     pub fn pointer_element<R: NiriRenderer>(
@@ -2207,13 +2257,53 @@ impl Niri {
         self.idle_notifier_state.set_is_inhibited(is_inhibited);
     }
 
+    pub fn refresh_window_rules(&mut self) {
+        let _span = tracy_client::span!("Niri::refresh_window_rules");
+
+        let config = self.config.borrow();
+        let window_rules = &config.window_rules;
+
+        let mut windows = vec![];
+        let mut outputs = HashSet::new();
+        self.layout.with_windows_mut(|mapped, output| {
+            if mapped.recompute_window_rules_if_needed(window_rules) {
+                windows.push(mapped.window.clone());
+
+                if let Some(output) = output {
+                    outputs.insert(output.clone());
+                }
+            }
+        });
+        drop(config);
+
+        for win in windows {
+            self.layout.update_window(&win);
+            win.toplevel()
+                .expect("no X11 support")
+                .send_pending_configure();
+        }
+        for output in outputs {
+            self.queue_redraw(&output);
+        }
+    }
+
     pub fn render<R: NiriRenderer>(
         &self,
         renderer: &mut R,
         output: &Output,
         include_pointer: bool,
+        mut target: RenderTarget,
     ) -> Vec<OutputRenderElements<R>> {
         let _span = tracy_client::span!("Niri::render");
+
+        if target == RenderTarget::Output {
+            if let Some(preview) = self.config.borrow().debug.preview_render {
+                target = match preview {
+                    PreviewRender::Screencast => RenderTarget::Screencast,
+                    PreviewRender::ScreenCapture => RenderTarget::ScreenCapture,
+                };
+            }
+        }
 
         let output_scale = Scale::from(output.current_scale().fractional_scale());
 
@@ -2279,7 +2369,7 @@ impl Niri {
         if self.screenshot_ui.is_open() {
             elements.extend(
                 self.screenshot_ui
-                    .render_output(output)
+                    .render_output(output, target)
                     .into_iter()
                     .map(OutputRenderElements::from),
             );
@@ -2309,7 +2399,7 @@ impl Niri {
 
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
-        let monitor_elements = mon.render_elements(renderer);
+        let monitor_elements = mon.render_elements(renderer, target);
 
         // Get layer-shell elements.
         let layer_map = layer_map_for_output(output);
@@ -2364,7 +2454,7 @@ impl Niri {
         let state = self.output_state.get_mut(output).unwrap();
         assert!(matches!(
             state.redraw_state,
-            RedrawState::Queued(_) | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
+            RedrawState::Queued | RedrawState::WaitingForEstimatedVBlankAndQueued(_)
         ));
 
         let target_presentation_time = state.frame_clock.next_presentation_time();
@@ -2398,15 +2488,14 @@ impl Niri {
 
         if res == RenderResult::Skipped {
             // Update the redraw state on failed render.
-            state.redraw_state =
-                if let RedrawState::WaitingForEstimatedVBlank(token)
-                | RedrawState::WaitingForEstimatedVBlankAndQueued((token, _)) =
-                    state.redraw_state
-                {
-                    RedrawState::WaitingForEstimatedVBlank(token)
-                } else {
-                    RedrawState::Idle
-                };
+            state.redraw_state = if let RedrawState::WaitingForEstimatedVBlank(token)
+            | RedrawState::WaitingForEstimatedVBlankAndQueued(token) =
+                state.redraw_state
+            {
+                RedrawState::WaitingForEstimatedVBlank(token)
+            } else {
+                RedrawState::Idle
+            };
         }
 
         // Update the lock render state on successful render, or if monitors are inactive. When
@@ -2965,8 +3054,9 @@ impl Niri {
                 let dmabuf = cast.dmabufs.borrow()[&fd].clone();
 
                 // FIXME: Hidden / embedded / metadata cursor
-                let elements = elements
-                    .get_or_insert_with(|| self.render::<GlesRenderer>(renderer, output, true));
+                let elements = elements.get_or_insert_with(|| {
+                    self.render::<GlesRenderer>(renderer, output, true, RenderTarget::Screencast)
+                });
                 let elements = elements.iter().rev();
 
                 if let Err(err) =
@@ -3002,7 +3092,12 @@ impl Niri {
         backend
             .with_primary_renderer(move |renderer| {
                 let elements = self
-                    .render(renderer, &output, screencopy.overlay_cursor())
+                    .render(
+                        renderer,
+                        &output,
+                        screencopy.overlay_cursor(),
+                        RenderTarget::ScreenCapture,
+                    )
                     .into_iter()
                     .rev();
 
@@ -3083,26 +3178,37 @@ impl Niri {
                 let size = transform.transform_size(size);
 
                 let scale = Scale::from(output.current_scale().fractional_scale());
-                let elements = self.render::<GlesRenderer>(renderer, &output, true);
-                let elements = elements.iter().rev();
+                let targets = [
+                    RenderTarget::Output,
+                    RenderTarget::Screencast,
+                    RenderTarget::ScreenCapture,
+                ];
+                let textures = targets.map(|target| {
+                    let elements = self.render::<GlesRenderer>(renderer, &output, true, target);
+                    let elements = elements.iter().rev();
 
-                let res = render_to_texture(
-                    renderer,
-                    size,
-                    scale,
-                    Transform::Normal,
-                    Fourcc::Abgr8888,
-                    elements,
-                );
-                let screenshot = match res {
-                    Ok((texture, _)) => texture,
-                    Err(err) => {
+                    let res = render_to_texture(
+                        renderer,
+                        size,
+                        scale,
+                        Transform::Normal,
+                        Fourcc::Abgr8888,
+                        elements,
+                    );
+
+                    if let Err(err) = &res {
                         warn!("error rendering output {}: {err:?}", output.name());
-                        return None;
                     }
-                };
 
-                Some((output, screenshot))
+                    res
+                });
+
+                if textures.iter().any(|res| res.is_err()) {
+                    return None;
+                }
+
+                let textures = textures.map(|res| res.unwrap().0);
+                Some((output, textures))
             })
             .collect();
 
@@ -3121,7 +3227,8 @@ impl Niri {
         let size = transform.transform_size(size);
 
         let scale = Scale::from(output.current_scale().fractional_scale());
-        let elements = self.render::<GlesRenderer>(renderer, output, true);
+        let elements =
+            self.render::<GlesRenderer>(renderer, output, true, RenderTarget::ScreenCapture);
         let elements = elements.iter().rev();
         let pixels = render_to_vec(
             renderer,
@@ -3140,32 +3247,43 @@ impl Niri {
         &self,
         renderer: &mut GlesRenderer,
         output: &Output,
-        window: &Window,
+        mapped: &Mapped,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
         let scale = Scale::from(output.current_scale().fractional_scale());
-        let bbox = window.bbox_with_popups();
-        let size = bbox.size.to_physical_precise_ceil(scale);
-        let buf_pos = Point::from((0, 0)) - bbox.loc;
+        let alpha = if mapped.is_fullscreen() {
+            1.
+        } else {
+            mapped.rules().opacity.unwrap_or(1.).clamp(0., 1.)
+        };
         // FIXME: pointer.
-        let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+        let elements = mapped.render(
             renderer,
-            buf_pos.to_physical_precise_ceil(scale),
+            mapped.window.geometry().loc,
             scale,
-            1.,
+            alpha,
+            RenderTarget::ScreenCapture,
         );
-        let elements = elements.iter().rev();
+        let geo = elements
+            .iter()
+            .map(|ele| ele.geometry(scale))
+            .reduce(|a, b| a.merge(b))
+            .unwrap_or_default();
+
+        let elements = elements.iter().rev().map(|elem| {
+            RelocateRenderElement::from_element(elem, geo.loc.upscale(-1), Relocate::Relative)
+        });
         let pixels = render_to_vec(
             renderer,
-            size,
+            geo.size,
             scale,
             Transform::Normal,
             Fourcc::Abgr8888,
             elements,
         )?;
 
-        self.save_screenshot(size, pixels)
+        self.save_screenshot(geo.size, pixels)
             .context("error saving screenshot")
     }
 
@@ -3260,7 +3378,12 @@ impl Niri {
         let transform = output.current_transform();
         let size = transform.transform_size(size);
 
-        let elements = self.render::<GlesRenderer>(renderer, &output, include_pointer);
+        let elements = self.render::<GlesRenderer>(
+            renderer,
+            &output,
+            include_pointer,
+            RenderTarget::ScreenCapture,
+        );
         let elements = elements.iter().rev();
         let pixels = render_to_vec(
             renderer,

@@ -166,7 +166,7 @@ impl CompositorHandler for State {
                             self.maybe_warp_cursor_to_focus();
                         }
 
-                        self.niri.queue_redraw(output);
+                        self.niri.queue_redraw(&output);
                     }
                     return;
                 }
@@ -204,7 +204,7 @@ impl CompositorHandler for State {
                     let unmapped = Unmapped::new(window);
                     self.niri.unmapped_windows.insert(surface.clone(), unmapped);
 
-                    self.niri.queue_redraw(output);
+                    self.niri.queue_redraw(&output);
                     return;
                 }
 
@@ -214,7 +214,7 @@ impl CompositorHandler for State {
                 // Popup placement depends on window size which might have changed.
                 self.update_reactive_popups(&window, &output);
 
-                self.niri.queue_redraw(output);
+                self.niri.queue_redraw(&output);
                 return;
             }
 
@@ -228,7 +228,7 @@ impl CompositorHandler for State {
             let output = output.clone();
             window.on_commit();
             self.niri.layout.update_window(&window);
-            self.niri.queue_redraw(output);
+            self.niri.queue_redraw(&output);
             return;
         }
 
@@ -236,7 +236,7 @@ impl CompositorHandler for State {
         self.popups_handle_commit(surface);
         if let Some(popup) = self.niri.popups.find_popup(surface) {
             if let Some(output) = self.output_for_popup(&popup) {
-                self.niri.queue_redraw(output.clone());
+                self.niri.queue_redraw(&output.clone());
             }
         }
 
@@ -261,7 +261,7 @@ impl CompositorHandler for State {
             for (output, state) in &self.niri.output_state {
                 if let Some(lock_surface) = &state.lock_surface {
                     if lock_surface.wl_surface() == surface {
-                        self.niri.queue_redraw(output.clone());
+                        self.niri.queue_redraw(&output.clone());
                         break;
                     }
                 }

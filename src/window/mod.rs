@@ -1,5 +1,6 @@
-use niri_config::{Match, WindowRule};
+use niri_config::{BlockOutFrom, Match, WindowRule};
 use smithay::desktop::{Window, WindowSurface};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes};
@@ -45,6 +46,28 @@ pub struct ResolvedWindowRules {
     ///
     /// `None` means using the SSD heuristic.
     pub draw_border_with_background: Option<bool>,
+
+    /// Extra opacity to draw this window with.
+    pub opacity: Option<f32>,
+
+    /// Whether to block out this window from certain render targets.
+    pub block_out_from: Option<BlockOutFrom>,
+}
+
+impl<'a> WindowRef<'a> {
+    pub fn toplevel(self) -> &'a ToplevelSurface {
+        match self {
+            WindowRef::Unmapped(unmapped) => unmapped.toplevel(),
+            WindowRef::Mapped(mapped) => mapped.toplevel(),
+        }
+    }
+
+    pub fn is_focused(self) -> bool {
+        match self {
+            WindowRef::Unmapped(_) => false,
+            WindowRef::Mapped(mapped) => mapped.is_focused(),
+        }
+    }
 }
 
 fn toplevel_window_matches(role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
@@ -125,7 +148,7 @@ impl ResolvedWindowRules {
         }
     }
 
-    pub fn compute(rules: &[WindowRule], window: &Window) -> Self {
+    pub fn compute(rules: &[WindowRule], window: WindowRef) -> Self {
         let _span = tracy_client::span!("ResolvedWindowRules::compute");
 
         match window.underlying_surface() {
@@ -146,8 +169,9 @@ impl ResolvedWindowRules {
 
         let mut resolved = ResolvedWindowRules::empty();
 
+        let toplevel = window.toplevel();
         with_states(&window.wl_surface().unwrap(), |states| {
-            let role = states
+            let mut role = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .unwrap()
@@ -165,6 +189,12 @@ impl ResolvedWindowRules {
 
                 if rule.excludes.iter().any(|m| window_matches(&role, m)) {
                     continue;
+                }
+                if let Some(x) = rule.opacity {
+                    resolved.opacity = Some(x);
+                }
+                if let Some(x) = rule.block_out_from {
+                    resolved.block_out_from = Some(x);
                 }
             }
 

@@ -59,7 +59,7 @@ use super::RenderResult;
 use crate::frame_clock::FrameClock;
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::renderer::AsGlesRenderer;
-use crate::render_helpers::shaders;
+use crate::render_helpers::{shaders, RenderTarget};
 use crate::utils::get_monotonic_time;
 
 const SUPPORTED_COLOR_FORMATS: &[Fourcc] = &[Fourcc::Argb8888, Fourcc::Abgr8888];
@@ -884,7 +884,7 @@ impl Tty {
         // Power on all monitors if necessary and queue a redraw on the new one.
         niri.event_loop.insert_idle(move |state| {
             state.niri.activate_monitors(&mut state.backend);
-            state.niri.queue_redraw(output);
+            state.niri.queue_redraw(&output);
         });
 
         Ok(())
@@ -1055,7 +1055,7 @@ impl Tty {
 
         let redraw_needed = match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
             RedrawState::Idle => unreachable!(),
-            RedrawState::Queued(_) => unreachable!(),
+            RedrawState::Queued => unreachable!(),
             RedrawState::WaitingForVBlank { redraw_needed } => redraw_needed,
             RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
             RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
@@ -1067,7 +1067,7 @@ impl Tty {
                 .non_continuous_frame(surface.vblank_frame_name);
             surface.vblank_frame = Some(vblank_frame);
 
-            niri.queue_redraw(output);
+            niri.queue_redraw(&output);
         } else {
             niri.send_frame_callbacks(&output);
         }
@@ -1089,18 +1089,18 @@ impl Tty {
 
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
             RedrawState::Idle => unreachable!(),
-            RedrawState::Queued(_) => unreachable!(),
+            RedrawState::Queued => unreachable!(),
             RedrawState::WaitingForVBlank { .. } => unreachable!(),
             RedrawState::WaitingForEstimatedVBlank(_) => (),
             // The timer fired just in front of a redraw.
-            RedrawState::WaitingForEstimatedVBlankAndQueued((_, idle)) => {
-                output_state.redraw_state = RedrawState::Queued(idle);
+            RedrawState::WaitingForEstimatedVBlankAndQueued(_) => {
+                output_state.redraw_state = RedrawState::Queued;
                 return;
             }
         }
 
         if output_state.unfinished_animations_remain {
-            niri.queue_redraw(output);
+            niri.queue_redraw(&output);
         } else {
             niri.send_frame_callbacks(&output);
         }
@@ -1162,7 +1162,8 @@ impl Tty {
         };
 
         // Render the elements.
-        let elements = niri.render::<TtyRenderer>(&mut renderer, output, true);
+        let elements =
+            niri.render::<TtyRenderer>(&mut renderer, output, true, RenderTarget::Output);
 
         // Hand them over to the DRM.
         let drm_compositor = &mut surface.compositor;
@@ -1198,10 +1199,10 @@ impl Tty {
                             };
                             match mem::replace(&mut output_state.redraw_state, new_state) {
                                 RedrawState::Idle => unreachable!(),
-                                RedrawState::Queued(_) => (),
+                                RedrawState::Queued => (),
                                 RedrawState::WaitingForVBlank { .. } => unreachable!(),
                                 RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
-                                RedrawState::WaitingForEstimatedVBlankAndQueued((token, _)) => {
+                                RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
                                     niri.event_loop.remove(token);
                                 }
                             };
@@ -1538,7 +1539,7 @@ impl Tty {
                 output.change_current_state(Some(wl_mode), None, None, None);
                 output.set_preferred(wl_mode);
                 output_state.frame_clock = FrameClock::new(Some(refresh_interval(mode)));
-                niri.output_resized(output);
+                niri.output_resized(&output);
             }
 
             for (connector, crtc) in device.drm_scanner.crtcs() {
@@ -1909,10 +1910,10 @@ fn queue_estimated_vblank_timer(
     let output_state = niri.output_state.get_mut(&output).unwrap();
     match mem::take(&mut output_state.redraw_state) {
         RedrawState::Idle => unreachable!(),
-        RedrawState::Queued(_) => (),
+        RedrawState::Queued => (),
         RedrawState::WaitingForVBlank { .. } => unreachable!(),
         RedrawState::WaitingForEstimatedVBlank(token)
-        | RedrawState::WaitingForEstimatedVBlankAndQueued((token, _)) => {
+        | RedrawState::WaitingForEstimatedVBlankAndQueued(token) => {
             output_state.redraw_state = RedrawState::WaitingForEstimatedVBlank(token);
             return;
         }

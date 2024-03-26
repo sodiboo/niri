@@ -17,6 +17,7 @@ use super::{LayoutElement, Options};
 use crate::animation::Animation;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::RenderTarget;
 use crate::swipe_tracker::SwipeTracker;
 use crate::utils::id::IdCounter;
 use crate::utils::output_size;
@@ -1340,6 +1341,7 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn render_elements<R: NiriRenderer>(
         &self,
         renderer: &mut R,
+        target: RenderTarget,
     ) -> Vec<WorkspaceRenderElement<R>> {
         if self.columns.is_empty() {
             return vec![];
@@ -1363,8 +1365,15 @@ impl<W: LayoutElement> Workspace<W> {
             first = false;
 
             rv.extend(
-                tile.render(renderer, tile_pos, output_scale, self.view_size, focus_ring)
-                    .map(Into::into),
+                tile.render(
+                    renderer,
+                    tile_pos,
+                    output_scale,
+                    self.view_size,
+                    focus_ring,
+                    target,
+                )
+                .map(Into::into),
             );
         }
 
@@ -1575,12 +1584,12 @@ impl<W: LayoutElement> Workspace<W> {
         true
     }
 
-    pub fn refresh(&self, is_active: bool) {
+    pub fn refresh(&mut self, is_active: bool) {
         let bounds = self.toplevel_bounds();
 
-        for (col_idx, col) in self.columns.iter().enumerate() {
-            for (tile_idx, tile) in col.tiles.iter().enumerate() {
-                let win = tile.window();
+        for (col_idx, col) in self.columns.iter_mut().enumerate() {
+            for (tile_idx, tile) in col.tiles.iter_mut().enumerate() {
+                let win = tile.window_mut();
                 let active = is_active
                     && self.active_column_idx == col_idx
                     && col.active_tile_idx == tile_idx;

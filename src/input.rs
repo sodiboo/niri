@@ -457,10 +457,7 @@ impl State {
                 let active = self.niri.layout.active_window();
                 if let Some((mapped, output)) = active {
                     self.backend.with_primary_renderer(|renderer| {
-                        if let Err(err) =
-                            self.niri
-                                .screenshot_window(renderer, output, &mapped.window)
-                        {
+                        if let Err(err) = self.niri.screenshot_window(renderer, output, mapped) {
                             warn!("error taking screenshot: {err:?}");
                         }
                     });
@@ -1157,23 +1154,26 @@ impl State {
         let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
         let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
 
-        // Handle wheel bindings.
+        // Handle wheel scroll bindings.
         if source == AxisSource::Wheel {
-            let comp_mod = self.backend.mod_key();
+            // If we have a scroll bind with current modifiers, then accumulate and don't pass to
+            // Wayland. If there's no bind, reset the accumulator.
             let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
+            let modifiers = modifiers_from_state(mods);
+            if self.niri.mods_with_wheel_binds.contains(&modifiers) {
+                let comp_mod = self.backend.mod_key();
 
-            if let Some(v120) = horizontal_amount_v120 {
-                let config = self.niri.config.borrow();
-                let bindings = &config.binds;
-                let bind_left = find_configured_bind(bindings, comp_mod, Trigger::WheelLeft, mods);
-                let bind_right =
-                    find_configured_bind(bindings, comp_mod, Trigger::WheelRight, mods);
-                drop(config);
+                let horizontal = horizontal_amount_v120.unwrap_or(0.);
+                let ticks = self.niri.horizontal_wheel_tracker.accumulate(horizontal);
+                if ticks != 0 {
+                    let config = self.niri.config.borrow();
+                    let bindings = &config.binds;
+                    let bind_left =
+                        find_configured_bind(bindings, comp_mod, Trigger::WheelScrollLeft, mods);
+                    let bind_right =
+                        find_configured_bind(bindings, comp_mod, Trigger::WheelScrollRight, mods);
+                    drop(config);
 
-                // If we have a bind with current modifiers along the scroll direction, then
-                // accumulate and don't pass to Wayland. If there's no bind, reset the accumulator.
-                if bind_left.is_some() || bind_right.is_some() {
-                    let ticks = self.niri.horizontal_wheel_tracker.accumulate(v120);
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
                             self.handle_bind(right.clone());
@@ -1184,21 +1184,19 @@ impl State {
                             self.handle_bind(left.clone());
                         }
                     }
-                    return;
-                } else {
-                    self.niri.horizontal_wheel_tracker.reset();
                 }
-            }
 
-            if let Some(v120) = vertical_amount_v120 {
-                let config = self.niri.config.borrow();
-                let bindings = &config.binds;
-                let bind_up = find_configured_bind(bindings, comp_mod, Trigger::WheelUp, mods);
-                let bind_down = find_configured_bind(bindings, comp_mod, Trigger::WheelDown, mods);
-                drop(config);
+                let vertical = vertical_amount_v120.unwrap_or(0.);
+                let ticks = self.niri.vertical_wheel_tracker.accumulate(vertical);
+                if ticks != 0 {
+                    let config = self.niri.config.borrow();
+                    let bindings = &config.binds;
+                    let bind_up =
+                        find_configured_bind(bindings, comp_mod, Trigger::WheelScrollUp, mods);
+                    let bind_down =
+                        find_configured_bind(bindings, comp_mod, Trigger::WheelScrollDown, mods);
+                    drop(config);
 
-                if bind_up.is_some() || bind_down.is_some() {
-                    let ticks = self.niri.vertical_wheel_tracker.accumulate(v120);
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
                             self.handle_bind(down.clone());
@@ -1209,18 +1207,93 @@ impl State {
                             self.handle_bind(up.clone());
                         }
                     }
-                    return;
-                } else {
-                    self.niri.vertical_wheel_tracker.reset();
                 }
+
+                return;
+            } else {
+                self.niri.horizontal_wheel_tracker.reset();
+                self.niri.vertical_wheel_tracker.reset();
             }
         }
 
-        let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {
+        let horizontal_amount = event.amount(Axis::Horizontal);
+        let vertical_amount = event.amount(Axis::Vertical);
+
+        // Handle touchpad scroll bindings.
+        if source == AxisSource::Finger {
+            let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
+            let modifiers = modifiers_from_state(mods);
+            if self.niri.mods_with_finger_scroll_binds.contains(&modifiers) {
+                let comp_mod = self.backend.mod_key();
+
+                let horizontal = horizontal_amount.unwrap_or(0.);
+                let ticks = self
+                    .niri
+                    .horizontal_finger_scroll_tracker
+                    .accumulate(horizontal);
+                if ticks != 0 {
+                    let config = self.niri.config.borrow();
+                    let bindings = &config.binds;
+                    let bind_left =
+                        find_configured_bind(bindings, comp_mod, Trigger::TouchpadScrollLeft, mods);
+                    let bind_right = find_configured_bind(
+                        bindings,
+                        comp_mod,
+                        Trigger::TouchpadScrollRight,
+                        mods,
+                    );
+                    drop(config);
+
+                    if let Some(right) = bind_right {
+                        for _ in 0..ticks {
+                            self.handle_bind(right.clone());
+                        }
+                    }
+                    if let Some(left) = bind_left {
+                        for _ in ticks..0 {
+                            self.handle_bind(left.clone());
+                        }
+                    }
+                }
+
+                let vertical = vertical_amount.unwrap_or(0.);
+                let ticks = self
+                    .niri
+                    .vertical_finger_scroll_tracker
+                    .accumulate(vertical);
+                if ticks != 0 {
+                    let config = self.niri.config.borrow();
+                    let bindings = &config.binds;
+                    let bind_up =
+                        find_configured_bind(bindings, comp_mod, Trigger::TouchpadScrollUp, mods);
+                    let bind_down =
+                        find_configured_bind(bindings, comp_mod, Trigger::TouchpadScrollDown, mods);
+                    drop(config);
+
+                    if let Some(down) = bind_down {
+                        for _ in 0..ticks {
+                            self.handle_bind(down.clone());
+                        }
+                    }
+                    if let Some(up) = bind_up {
+                        for _ in ticks..0 {
+                            self.handle_bind(up.clone());
+                        }
+                    }
+                }
+
+                return;
+            } else {
+                self.niri.horizontal_finger_scroll_tracker.reset();
+                self.niri.vertical_finger_scroll_tracker.reset();
+            }
+        }
+
+        let horizontal_amount = horizontal_amount.unwrap_or_else(|| {
             // Winit backend, discrete scrolling.
             horizontal_amount_v120.unwrap_or(0.0) / 120. * 15.
         });
-        let vertical_amount = event.amount(Axis::Vertical).unwrap_or_else(|| {
+        let vertical_amount = vertical_amount.unwrap_or_else(|| {
             // Winit backend, discrete scrolling.
             vertical_amount_v120.unwrap_or(0.0) / 120. * 15.
         });
@@ -1477,7 +1550,7 @@ impl State {
             .workspace_switch_gesture_update(delta_y, timestamp);
         if let Some(output) = res {
             if let Some(output) = output {
-                self.niri.queue_redraw(output);
+                self.niri.queue_redraw(&output);
             }
             handled = true;
         }
@@ -1488,7 +1561,7 @@ impl State {
             .view_offset_gesture_update(delta_x, timestamp);
         if let Some(output) = res {
             if let Some(output) = output {
-                self.niri.queue_redraw(output);
+                self.niri.queue_redraw(&output);
             }
             handled = true;
         }
@@ -1522,13 +1595,13 @@ impl State {
             .layout
             .workspace_switch_gesture_end(event.cancelled());
         if let Some(output) = res {
-            self.niri.queue_redraw(output);
+            self.niri.queue_redraw(&output);
             handled = true;
         }
 
         let res = self.niri.layout.view_offset_gesture_end(event.cancelled());
         if let Some(output) = res {
-            self.niri.queue_redraw(output);
+            self.niri.queue_redraw(&output);
             handled = true;
         }
 
@@ -1864,19 +1937,7 @@ fn find_configured_bind(
     mods: ModifiersState,
 ) -> Option<Bind> {
     // Handle configured binds.
-    let mut modifiers = Modifiers::empty();
-    if mods.ctrl {
-        modifiers |= Modifiers::CTRL;
-    }
-    if mods.shift {
-        modifiers |= Modifiers::SHIFT;
-    }
-    if mods.alt {
-        modifiers |= Modifiers::ALT;
-    }
-    if mods.logo {
-        modifiers |= Modifiers::SUPER;
-    }
+    let mut modifiers = modifiers_from_state(mods);
 
     let (mod_down, comp_mod) = match comp_mod {
         CompositorMod::Super => (mods.logo, Modifiers::SUPER),
@@ -1904,6 +1965,26 @@ fn find_configured_bind(
     }
 
     None
+}
+
+fn modifiers_from_state(mods: ModifiersState) -> Modifiers {
+    let mut modifiers = Modifiers::empty();
+    if mods.ctrl {
+        modifiers |= Modifiers::CTRL;
+    }
+    if mods.shift {
+        modifiers |= Modifiers::SHIFT;
+    }
+    if mods.alt {
+        modifiers |= Modifiers::ALT;
+    }
+    if mods.logo {
+        modifiers |= Modifiers::SUPER;
+    }
+    if mods.iso_level3_shift {
+        modifiers |= Modifiers::ISO_LEVEL3_SHIFT;
+    }
+    modifiers
 }
 
 fn should_activate_monitors<I: InputBackend>(event: &InputEvent<I>) -> bool {
@@ -2054,6 +2135,60 @@ pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::
             let _ = device.config_accel_set_profile(default);
         }
     }
+}
+
+pub fn mods_with_binds(
+    comp_mod: CompositorMod,
+    binds: &Binds,
+    triggers: &[Trigger],
+) -> HashSet<Modifiers> {
+    let comp_mod = match comp_mod {
+        CompositorMod::Super => Modifiers::SUPER,
+        CompositorMod::Alt => Modifiers::ALT,
+    };
+
+    let mut rv = HashSet::new();
+    for bind in &binds.0 {
+        if !triggers.iter().any(|trigger| bind.key.trigger == *trigger) {
+            continue;
+        }
+
+        let mut mods = bind.key.modifiers;
+        if mods.contains(Modifiers::COMPOSITOR) {
+            mods.remove(Modifiers::COMPOSITOR);
+            mods.insert(comp_mod);
+        }
+
+        rv.insert(mods);
+    }
+
+    rv
+}
+
+pub fn mods_with_wheel_binds(comp_mod: CompositorMod, binds: &Binds) -> HashSet<Modifiers> {
+    mods_with_binds(
+        comp_mod,
+        binds,
+        &[
+            Trigger::WheelScrollUp,
+            Trigger::WheelScrollDown,
+            Trigger::WheelScrollLeft,
+            Trigger::WheelScrollRight,
+        ],
+    )
+}
+
+pub fn mods_with_finger_scroll_binds(comp_mod: CompositorMod, binds: &Binds) -> HashSet<Modifiers> {
+    mods_with_binds(
+        comp_mod,
+        binds,
+        &[
+            Trigger::TouchpadScrollUp,
+            Trigger::TouchpadScrollDown,
+            Trigger::TouchpadScrollLeft,
+            Trigger::TouchpadScrollRight,
+        ],
+    )
 }
 
 #[cfg(test)]
