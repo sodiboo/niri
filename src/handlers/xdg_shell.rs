@@ -1,3 +1,4 @@
+use niri_config::{Match, WindowRule};
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface,
     PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
@@ -20,7 +21,7 @@ use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgPopupSurfaceData, XdgShellHandler,
-    XdgShellState, XdgToplevelSurfaceData,
+    XdgShellState, XdgToplevelSurfaceData, XdgToplevelSurfaceRoleAttributes,
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 use smithay::xwayland::X11Surface;
@@ -31,83 +32,6 @@ use smithay::{
 use crate::layout::workspace::ColumnWidth;
 use crate::niri::{PopupGrabState, State};
 use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped};
-
-fn toplevel_window_matches(role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
-    m.app_id.as_ref().map_or(true, |re| {
-        role.app_id
-            .as_ref()
-            .map_or(false, |app_id| re.is_match(app_id))
-    }) && m.title.as_ref().map_or(true, |re| {
-        role.title
-            .as_ref()
-            .map_or(false, |title| re.is_match(title))
-    })
-}
-
-fn x11_window_matches(surface: &X11Surface, m: &Match) -> bool {
-    m.app_id
-        .as_ref()
-        .map_or(true, |re| re.is_match(&surface.class()))
-        && m.title
-            .as_ref()
-            .map_or(true, |re| re.is_match(&surface.title()))
-}
-
-pub fn resolve_window_rules(rules: &[WindowRule], window: &Window) -> ResolvedWindowRules {
-    let _span = tracy_client::span!("resolve_window_rules");
-
-    match window.underlying_surface() {
-        WindowSurface::Wayland(toplevel) => with_states(toplevel.wl_surface(), |states| {
-            let role = states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .unwrap()
-                .lock()
-                .unwrap();
-
-            resolve_window_rules_for_predicate(rules, |m| toplevel_window_matches(&role, m))
-        }),
-        WindowSurface::X11(surface) => {
-            resolve_window_rules_for_predicate(rules, |m| x11_window_matches(surface, m))
-        }
-    }
-}
-
-fn resolve_window_rules_for_predicate(
-    rules: &[WindowRule],
-    f: impl Fn(&Match) -> bool,
-) -> ResolvedWindowRules {
-    let _span = tracy_client::span!("resolve_window_rules_for_predicate");
-
-    let mut default_width = None;
-    let mut open_on_output = None;
-    let mut open_maximized = None;
-    let mut open_fullscreen = None;
-    for rule in rules {
-        if rule.excludes.iter().any(&f) {
-            continue;
-        }
-        if !(rule.matches.is_empty() || rule.matches.iter().any(&f)) {
-            continue;
-        }
-        default_width = rule
-            .default_column_width
-            .as_ref()
-            .map(|d| d.0.map(ColumnWidth::from))
-            .or(default_width);
-
-        open_on_output = rule.open_on_output.as_deref().or(open_on_output);
-        open_maximized = rule.open_maximized.or(open_maximized);
-        open_fullscreen = rule.open_fullscreen.or(open_fullscreen);
-    }
-
-    ResolvedWindowRules {
-        default_width,
-        open_on_output: open_on_output.map(ToOwned::to_owned),
-        open_maximized,
-        open_fullscreen,
-    }
-}
 
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {

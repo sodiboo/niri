@@ -2,17 +2,19 @@ use std::cmp::{max, min};
 
 use smithay::backend::renderer::element::{AsRenderElements as _, Id};
 use smithay::desktop::space::SpaceElement as _;
-use smithay::desktop::Window;
+use smithay::desktop::{Window, WindowSurface};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::{send_surface_state, with_states};
-use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface};
+use smithay::wayland::seat::WaylandFocus;
+use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use super::ResolvedWindowRules;
-use crate::layout::{LayoutElement, LayoutElementRenderElement};
+use crate::handlers::xwayland::XUnwrap;
+use crate::layout::LayoutElementRenderElement;
 use crate::niri::WindowOffscreenId;
 use crate::render_helpers::renderer::NiriRenderer;
 
@@ -28,13 +30,9 @@ impl Mapped {
     pub fn new(window: Window, rules: ResolvedWindowRules) -> Self {
         Self { window, rules }
     }
-
-    pub fn toplevel(&self) -> &ToplevelSurface {
-        self.window.toplevel().expect("no X11 support")
-    }
 }
 
-impl LayoutElement for Mapped {
+impl crate::layout::LayoutElement for Mapped {
     type Id = Window;
 
     fn id(&self) -> &Self::Id {
@@ -69,22 +67,40 @@ impl LayoutElement for Mapped {
         )
     }
 
-    fn request_size(&self, size: Size<i32, Logical>) {
-        self.toplevel().with_pending_state(|state| {
-            state.size = Some(size);
-            state.states.unset(xdg_toplevel::State::Fullscreen);
-        });
+    fn request_configure(&self, rect: Rectangle<i32, Logical>) {
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+                state.size = Some(rect.size);
+            }),
+            WindowSurface::X11(surface) => {
+                if surface.geometry().loc != rect.loc {
+                    debug!("configure {:?} #{:?}", surface.title(), surface.class());
+                    debug!("with new loc {:?}", rect.loc)
+                }
+                surface.set_fullscreen(false).xunwrap();
+                surface.configure(rect).xunwrap();
+            }
+        }
     }
 
     fn request_fullscreen(&self, size: Size<i32, Logical>) {
-        self.toplevel().with_pending_state(|state| {
-            state.size = Some(size);
-            state.states.set(xdg_toplevel::State::Fullscreen);
-        });
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
+                state.size = Some(size);
+                state.states.set(xdg_toplevel::State::Fullscreen);
+            }),
+            WindowSurface::X11(surface) => {
+                surface
+                    .configure(Rectangle::from_loc_and_size((0, 0), size))
+                    .unwrap();
+                surface.set_fullscreen(true).unwrap();
+            }
+        }
     }
 
     fn min_size(&self) -> Size<i32, Logical> {
-        let mut size = with_states(self.toplevel().wl_surface(), |state| {
+        let mut size = with_states(&self.window.wl_surface().unwrap(), |state| {
             let curr = state.cached_state.current::<SurfaceCachedState>();
             curr.min_size
         });
@@ -100,7 +116,7 @@ impl LayoutElement for Mapped {
     }
 
     fn max_size(&self) -> Size<i32, Logical> {
-        let mut size = with_states(self.toplevel().wl_surface(), |state| {
+        let mut size = with_states(&self.window.wl_surface().unwrap(), |state| {
             let curr = state.cached_state.current::<SurfaceCachedState>();
             curr.max_size
         });
@@ -124,7 +140,13 @@ impl LayoutElement for Mapped {
     }
 
     fn is_wl_surface(&self, wl_surface: &WlSurface) -> bool {
-        self.toplevel().wl_surface() == wl_surface
+        self.window.wl_surface().as_ref() == Some(wl_surface)
+    }
+
+    fn is_override_redirect(&self) -> bool {
+        self.window
+            .x11_surface()
+            .map_or(false, |surface| surface.is_override_redirect())
     }
 
     fn set_preferred_scale_transform(&self, scale: i32, transform: Transform) {
@@ -134,8 +156,13 @@ impl LayoutElement for Mapped {
     }
 
     fn has_ssd(&self) -> bool {
-        self.toplevel().current_state().decoration_mode
-            == Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => {
+                toplevel.current_state().decoration_mode
+                    == Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
+            }
+            WindowSurface::X11(surface) => !surface.is_decorated(),
+        }
     }
 
     fn output_enter(&self, output: &Output) {
@@ -160,25 +187,56 @@ impl LayoutElement for Mapped {
     }
 
     fn set_bounds(&self, bounds: Size<i32, Logical>) {
-        self.toplevel().with_pending_state(|state| {
-            state.bounds = Some(bounds);
-        });
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
+                state.bounds = Some(bounds);
+            }),
+            WindowSurface::X11(_surface) => {}
+        }
     }
 
     fn send_pending_configure(&self) {
-        self.toplevel().send_pending_configure();
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => {
+                toplevel.send_pending_configure();
+            }
+            WindowSurface::X11(_surface) => {}
+        }
+    }
+
+    fn close(&self) {
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel.send_close(),
+            WindowSurface::X11(surface) => surface.close().unwrap(),
+        }
+    }
+
+    fn can_fullscreen(&self) -> bool {
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel
+                .current_state()
+                .capabilities
+                .contains(xdg_toplevel::WmCapabilities::Fullscreen),
+            WindowSurface::X11(_) => true,
+        }
     }
 
     fn is_fullscreen(&self) -> bool {
-        self.toplevel()
-            .current_state()
-            .states
-            .contains(xdg_toplevel::State::Fullscreen)
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel
+                .current_state()
+                .states
+                .contains(xdg_toplevel::State::Fullscreen),
+            WindowSurface::X11(surface) => surface.is_fullscreen(),
+        }
     }
 
     fn is_pending_fullscreen(&self) -> bool {
-        self.toplevel()
-            .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen))
+        match self.window.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => toplevel
+                .with_pending_state(|state| state.states.contains(xdg_toplevel::State::Fullscreen)),
+            WindowSurface::X11(surface) => surface.is_fullscreen(),
+        }
     }
 
     fn refresh(&self) {

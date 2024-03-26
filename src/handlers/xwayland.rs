@@ -18,8 +18,8 @@ use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
 use tracing::{error, trace};
 
+use crate::layout::LayoutElement;
 use crate::niri::State;
-use crate::utils::clone2;
 use crate::window::Unmapped;
 
 pub trait XUnwrap {
@@ -120,15 +120,15 @@ impl XwmHandler for State {
 
         let win_out = self.niri.layout.find_window_and_output(&surface);
 
-        let Some((window, output)) = win_out.map(clone2) else {
+        let Some((window, output)) = win_out else {
             // I have no idea how this can happen, but I saw it happen once, in a weird interaction
             // involving laptop going to sleep and resuming.
             error!("toplevel missing from both unmapped_windows and layout");
             return;
         };
 
-        self.niri.layout.remove_window(&window);
-        self.niri.queue_redraw(output);
+        self.niri.layout.remove_window(window.id());
+        self.niri.queue_redraw(output.clone());
     }
     fn configure_request(
         &mut self,

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use niri_config::{CenterFocusedColumn, PresetWidth, Struts};
 use niri_ipc::SizeChange;
-use smithay::desktop::{layer_map_for_output, Window};
+use smithay::desktop::{layer_map_for_output, Window, WindowSurface};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -416,13 +416,17 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn abs_position(&self, window: &W) -> Option<Point<i32, Logical>> {
         self.columns
             .iter()
-            .position(|c| c.contains(window))
+            .position(|c| c.contains(window.id()))
             .map(|idx| (self.visual_column_x(idx), 0).into())
     }
 
     pub fn configure_new_window(&self, window: &Window, width: Option<ColumnWidth>) {
         if let Some(output) = self.output.as_ref() {
-            set_preferred_scale_transform(window, output);
+            let scale = output.current_scale().integer_scale();
+            let transform = output.current_transform();
+            window.with_surfaces(|surface, data| {
+                send_surface_state(surface, data, scale, transform);
+            });
         }
 
         match window.underlying_surface() {
@@ -1582,13 +1586,8 @@ impl<W: LayoutElement> Workspace<W> {
                     && col.active_tile_idx == tile_idx;
                 win.set_activated(active);
 
-                // TODO: x11 bounds
-                if let Some(toplevel) = win.toplevel() {
-                    toplevel.with_pending_state(|state| {
-                        state.bounds = Some(bounds);
-                    });
-                    toplevel.send_pending_configure();
-                }
+                win.set_bounds(bounds);
+                win.send_pending_configure();
 
                 win.refresh();
             }

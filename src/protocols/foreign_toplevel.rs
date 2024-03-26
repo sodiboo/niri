@@ -96,7 +96,7 @@ pub fn refresh(state: &mut State) {
     // the previous window and only then activate the newly focused window.
     let mut focused = None;
     state.niri.layout.with_windows(|mapped, output| {
-        let Some(toplevel) = mapped.toplevel() else {
+        let Some(toplevel) = mapped.window.toplevel() else {
             return;
         };
 
@@ -117,8 +117,8 @@ pub fn refresh(state: &mut State) {
     });
 
     // Finally, refresh the focused window.
-    if let Some((toplevel, output)) = focused {
-        with_states(toplevel.wl_surface(), |states| {
+    if let Some((window, output)) = focused {
+        with_states(window.wl_surface().unwrap(), |states| {
             let role = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
@@ -128,7 +128,7 @@ pub fn refresh(state: &mut State) {
 
             refresh_toplevel(
                 protocol_state,
-                toplevel.wl_surface(),
+                window.wl_surface(),
                 &role,
                 output.as_ref(),
                 true,
