@@ -15,6 +15,7 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::xwayland::{X11Surface, X11Wm};
 use smithay::{delegate_compositor, delegate_shm};
 
 use crate::niri::{ClientState, State};
@@ -81,6 +82,7 @@ impl CompositorHandler for State {
     fn commit(&mut self, surface: &WlSurface) {
         let _span = tracy_client::span!("CompositorHandler::commit");
 
+        X11Wm::commit_hook::<Self>(surface);
         on_commit_buffer_handler::<Self>(surface);
         self.backend.early_import(surface);
 
@@ -221,6 +223,12 @@ impl CompositorHandler for State {
             // This is a commit of a non-toplevel root.
         }
 
+        // if surface.client().map_or(false, |c| c.is_xwayland()) {
+        //     debug!("commit of xwayland surface");
+        //     self.niri.queue_redraw_all();
+        //     return;
+        // }
+
         // This is a commit of a non-root or a non-toplevel root.
         let root_window_output = self.niri.layout.find_window_and_output(&root_surface);
         if let Some((mapped, output)) = root_window_output {
@@ -229,6 +237,16 @@ impl CompositorHandler for State {
             window.on_commit();
             self.niri.layout.update_window(&window);
             self.niri.queue_redraw(&output);
+            return;
+        }
+
+        if self
+            .niri
+            .override_redirect
+            .iter()
+            .any(|w| w.wl_surface().as_ref() == Some(surface))
+        {
+            self.niri.queue_redraw_all();
             return;
         }
 

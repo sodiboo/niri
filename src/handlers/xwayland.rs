@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use smithay::desktop::Window;
 use smithay::utils::{Logical, Rectangle};
-use smithay::wayland::compositor::get_parent;
 use smithay::wayland::selection::data_device::{
     clear_data_device_selection, current_data_device_selection_userdata,
     request_data_device_client_selection, set_data_device_selection,
@@ -31,7 +30,7 @@ impl<E: Debug> XUnwrap for Result<(), E> {
     type T = ();
     fn xunwrap(self) -> Self::T {
         if let Err(err) = self {
-            error!("X11 error: {:?}", err);
+            error!("we are ignoring an X11 error: {:?}", err);
         }
     }
 }
@@ -50,55 +49,21 @@ impl XwmHandler for State {
     }
 
     fn map_window_notify(&mut self, _xwm: XwmId, window: X11Surface) {
-        debug!(
-            "map {} {:?}, #{}",
-            window.window_id(),
-            window.title(),
-            window.class()
-        );
-        debug!("with geometry {:?}", window.geometry());
         let wl_surface = window.wl_surface().unwrap();
         if window.is_override_redirect() {
-            debug!("and is override-redirect");
-            if get_parent(&wl_surface).is_some() {
-                debug!("and has parent");
-            } else {
-                debug!("and without parent");
-            }
-            debug!("and transient for {:?}", window.is_transient_for());
-            debug!("and mapped to {:?}", window.mapped_window_id());
-            debug!("is popup: {}", window.is_popup());
-
             self.niri.override_redirect.push(window.clone());
             self.niri.queue_redraw_all();
 
-            // return;
+            return;
         }
         let unmapped = Unmapped::new(Window::new_x11_window(window));
         let existing = self.niri.unmapped_windows.insert(wl_surface, unmapped);
         assert!(existing.is_none());
     }
 
-    fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        debug!(
-            "mapped_override_redirect {}, {:?}, #{}",
-            window.window_id(),
-            window.title(),
-            window.class()
-        );
-        debug!("with geometry {:?}", window.geometry());
-        // let location = window.geometry().loc;
-        // let window = WindowElement(Window::new_x11_window(window));
-        // self.state.space.map_element(window, location, true);
-    }
+    fn mapped_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        debug!(
-            "unmap {}, {:?}, #{}",
-            window.window_id(),
-            window.title(),
-            window.class()
-        );
         if window.is_override_redirect() {
             if let Some(index) = self
                 .niri
@@ -109,6 +74,7 @@ impl XwmHandler for State {
                 self.niri.override_redirect.remove(index);
                 self.niri.queue_redraw_all();
             }
+            return;
         }
         let Some(surface) = window.wl_surface() else {
             error!("unmapped_window without wl_surface");
@@ -121,9 +87,7 @@ impl XwmHandler for State {
         let win_out = self.niri.layout.find_window_and_output(&surface);
 
         let Some((window, output)) = win_out else {
-            // I have no idea how this can happen, but I saw it happen once, in a weird interaction
-            // involving laptop going to sleep and resuming.
-            error!("toplevel missing from both unmapped_windows and layout");
+            error!("X11Surface missing from both unmapped_windows and layout");
             return;
         };
 

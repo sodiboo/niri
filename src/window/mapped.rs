@@ -151,10 +151,10 @@ impl crate::layout::LayoutElement for Mapped {
                 state.size = Some(rect.size);
             }),
             WindowSurface::X11(surface) => {
-                if surface.geometry().loc != rect.loc {
-                    debug!("configure {:?} #{:?}", surface.title(), surface.class());
-                    debug!("with new loc {:?}", rect.loc)
-                }
+                // if surface.geometry().loc != rect.loc {
+                // debug!("configure {:?} #{:?}", surface.title(), surface.class());
+                // debug!("with new loc {:?}", rect.loc)
+                // }
                 surface.set_fullscreen(false).xunwrap();
                 surface.configure(rect).xunwrap();
             }

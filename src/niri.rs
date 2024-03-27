@@ -30,7 +30,8 @@ use smithay::desktop::utils::{
     bbox_from_surface_tree, output_update, send_dmabuf_feedback_surface_tree,
     send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
     surface_primary_scanout_output, take_presentation_feedback_surface_tree,
-    under_from_surface_tree, update_surface_primary_scanout_output, OutputPresentationFeedback,
+    under_from_surface_tree, update_surface_primary_scanout_output, with_surfaces_surface_tree,
+    OutputPresentationFeedback,
 };
 use smithay::desktop::{
     layer_map_for_output, LayerSurface, PopupGrab, PopupManager, PopupUngrabStrategy, Space,
@@ -2758,6 +2759,33 @@ impl Niri {
                 },
             );
         }
+
+        self.override_redirect.iter().for_each(|or| {
+            if let Some(wl_surface) = or.wl_surface() {
+                // with_surfaces_surface_tree(&wl_surface, |surface, states| {
+                //     let primary_scanout_output = update_surface_primary_scanout_output(
+                //         surface,
+                //         output,
+                //         states,
+                //         render_element_states,
+                //         default_primary_scanout_output_compare,
+                //     );
+                // });
+                send_dmabuf_feedback_surface_tree(
+                    &wl_surface,
+                    output,
+                    surface_primary_scanout_output,
+                    |surface, _| {
+                        select_dmabuf_feedback(
+                            surface,
+                            render_element_states,
+                            &feedback.render,
+                            &feedback.scanout,
+                        )
+                    },
+                );
+            }
+        });
     }
 
     pub fn send_frame_callbacks(&self, output: &Output) {
@@ -2848,6 +2876,27 @@ impl Niri {
                 should_send,
             );
         }
+
+        self.override_redirect.iter().for_each(|or| {
+            if let Some(wl_surface) = or.wl_surface() {
+                // with_surfaces_surface_tree(&wl_surface, |surface, states| {
+                //     let primary_scanout_output = update_surface_primary_scanout_output(
+                //         surface,
+                //         output,
+                //         states,
+                //         render_element_states,
+                //         default_primary_scanout_output_compare,
+                //     );
+                // });
+                send_frames_surface_tree(
+                    &wl_surface,
+                    output,
+                    frame_callback_time,
+                    FRAME_CALLBACK_THROTTLE,
+                    surface_primary_scanout_output,
+                );
+            }
+        });
     }
 
     pub fn send_frame_callbacks_on_fallback_timer(&self) {
@@ -2977,6 +3026,22 @@ impl Niri {
                 },
             );
         }
+
+        self.override_redirect.iter().for_each(|surface| {
+            if let Some(wl_surface) = surface.wl_surface() {
+                take_presentation_feedback_surface_tree(
+                    &wl_surface,
+                    &mut feedback,
+                    surface_primary_scanout_output,
+                    |surface, _| {
+                        surface_presentation_feedback_flags_from_states(
+                            surface,
+                            render_element_states,
+                        )
+                    },
+                )
+            }
+        });
 
         feedback
     }
