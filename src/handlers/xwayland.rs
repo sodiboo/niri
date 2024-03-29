@@ -49,16 +49,17 @@ impl XwmHandler for State {
     }
 
     fn map_window_notify(&mut self, _xwm: XwmId, window: X11Surface) {
-        let wl_surface = window.wl_surface().unwrap();
         if window.is_override_redirect() {
             self.niri.override_redirect.push(window.clone());
             self.niri.queue_redraw_all();
-
             return;
         }
-        let unmapped = Unmapped::new(Window::new_x11_window(window));
+        let wl_surface = window.wl_surface().unwrap();
+        let window = Window::new_x11_window(window);
+        let unmapped = Unmapped::new(window.clone());
         let existing = self.niri.unmapped_windows.insert(wl_surface, unmapped);
         assert!(existing.is_none());
+        self.send_initial_configure(&window);
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}

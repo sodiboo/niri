@@ -1,7 +1,7 @@
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface,
     PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
-    WindowSurfaceType,
+    WindowSurface, WindowSurfaceType,
 };
 use smithay::input::pointer::Focus;
 use smithay::output::Output;
@@ -27,6 +27,7 @@ use smithay::{
     delegate_kde_decoration, delegate_xdg_decoration, delegate_xdg_foreign, delegate_xdg_shell,
 };
 
+use super::xwayland::XUnwrap;
 use crate::layout::workspace::ColumnWidth;
 use crate::niri::{PopupGrabState, State};
 use crate::window::{InitialConfigureState, ResolvedWindowRules, Unmapped, WindowRef};
@@ -488,7 +489,6 @@ fn initial_configure_sent(toplevel: &ToplevelSurface) -> bool {
 impl State {
     pub fn send_initial_configure(&mut self, window: &Window) {
         let _span = tracy_client::span!("State::send_initial_configure");
-        let toplevel = window.toplevel().unwrap();
 
         let Some(unmapped) = self
             .niri
@@ -528,8 +528,9 @@ impl State {
 
         // If not, check if this is a dialog with a parent, to place it next to the parent.
         let mon = mon.map(|mon| (mon, false)).or_else(|| {
-            toplevel
-                .parent()
+            window
+                .toplevel()
+                .and_then(|toplevel| toplevel.parent())
                 .and_then(|parent| self.niri.layout.find_window_and_output(&parent))
                 .map(|(_win, output)| output)
                 .and_then(|o| self.niri.layout.monitor_for_output(o))
@@ -564,9 +565,14 @@ impl State {
             if (wants_fullscreen.is_some() && rules.open_fullscreen.is_none())
                 || rules.open_fullscreen == Some(true)
             {
-                toplevel.with_pending_state(|state| {
-                    state.states.set(xdg_toplevel::State::Fullscreen);
-                });
+                match window.underlying_surface() {
+                    WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                    }),
+                    WindowSurface::X11(surface) => {
+                        surface.set_fullscreen(true).xunwrap();
+                    }
+                }
             }
 
             width = ws.resolve_default_width(rules.default_width);
@@ -582,12 +588,17 @@ impl State {
         // If the user prefers no CSD, it's a reasonable assumption that they would prefer to get
         // rid of the various client-side rounded corners also by using the tiled state.
         if config.prefer_no_csd {
-            toplevel.with_pending_state(|state| {
-                state.states.set(xdg_toplevel::State::TiledLeft);
-                state.states.set(xdg_toplevel::State::TiledRight);
-                state.states.set(xdg_toplevel::State::TiledTop);
-                state.states.set(xdg_toplevel::State::TiledBottom);
-            });
+            match window.underlying_surface() {
+                WindowSurface::Wayland(toplevel) => {
+                    toplevel.with_pending_state(|state| {
+                        state.states.set(xdg_toplevel::State::TiledLeft);
+                        state.states.set(xdg_toplevel::State::TiledRight);
+                        state.states.set(xdg_toplevel::State::TiledTop);
+                        state.states.set(xdg_toplevel::State::TiledBottom);
+                    });
+                }
+                WindowSurface::X11(surface) => {}
+            }
         }
 
         // Set the configured settings.
@@ -598,7 +609,9 @@ impl State {
             output,
         };
 
-        toplevel.send_configure();
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_configure();
+        }
     }
 
     pub fn queue_initial_configure(&self, window: Window) {
