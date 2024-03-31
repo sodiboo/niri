@@ -17,6 +17,7 @@ use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
 use tracing::{error, trace};
 
+use crate::layout::workspace::WorkspaceId;
 use crate::layout::LayoutElement;
 use crate::niri::State;
 use crate::window::Unmapped;
@@ -31,6 +32,74 @@ impl<E: Debug> XUnwrap for Result<(), E> {
     fn xunwrap(self) -> Self::T {
         if let Err(err) = self {
             error!("we are ignoring an X11 error: {:?}", err);
+        }
+    }
+}
+
+// HORRIBLE HACK: X11 windows need an absolute position, and we can't just make shit up
+// This is because they use that position to place "override redirect" windows.
+// Override redirect windows are not directly associated to any parent,
+// and while we "could" maybe correlate them via window class, client, etc
+// that approach is quite fragile and therefore undesirable
+//
+// It is also not advisable to give them real screenspace coordinates,
+// because in niri this will overlap on output edges
+//
+// My solution? Make them store your metadata:
+// - The window position is 32 bits
+// - Reserve MSB=0; that one is a sign bit.
+// - We have 31 bits left for x and y; 62 in total
+// - Reserve the top 16 (of what's left) in the y coordinate
+// - That leaves 15 bits: 32768 y positions should be enough
+// - For the x position, that's not enough, as niri scrolls far horizontally:
+// - We give the x coordinate 8 more bits; reserve only 8
+// That leaves us with 24 reserved bits.
+// We're not touching the width or height, because that's gonna fuck with the layout.
+//
+// The memory layout of the x and y coordinates, as well as the workspace id looks like this:
+// y coordimate: 0YYYYYYYYYYYYYYYY...............
+// x coordinate: 0XXXXXXXX.......................
+// workspace id: 00000000YYYYYYYYYYYYYYYYXXXXXXXX
+// where "Y" and "X" are reserved parts of Y and X coords; and . is the actual "position" of this
+// window.
+//
+// This way, we can associate an override redirect window with the correct workspace; and the
+// correct position relative to that workspace. This is necessary, because in niri, window "popups"
+// should not overlap the next screen over if they are out of bounds. If we reported real
+// screenspace coordinates, we could not disambiguate out-of-bounds on one screen from the next
+// screen over.
+//
+// A workspace id of 0 is reserved for window positions representing "screenspace" windows; i.e
+// notification toasts that appear in the corner of your monitor. Since clients may ignore their own
+// position and spawn windows like this, we must be able to handle them.
+#[derive(Debug, Clone)]
+enum RichGeometry {
+    Absolute(Rectangle<i32, Logical>),
+    Workspace(WorkspaceId, Rectangle<i32, Logical>),
+}
+
+impl State {
+    fn fake_override_redirect_geometry(&self, rect: RichGeometry) -> Rectangle<i32, Logical> {
+        match rect {
+            RichGeometry::Absolute(rect) => rect,
+            RichGeometry::Workspace(workspace_id, rect) => {
+                let workspace_id = workspace_id.inner_u32() as i32;
+                let x = rect.loc.x | ((workspace_id & 0xFF) << 23);
+                let y = rect.loc.y | ((workspace_id >> 8) << 15);
+                Rectangle::from_loc_and_size((x, y), rect.size)
+            }
+        }
+    }
+
+    fn unfake_override_redirect_geometry(&self, rect: Rectangle<i32, Logical>) -> RichGeometry {
+        let real_x = rect.loc.x & 0x7FFFFF;
+        let real_y = rect.loc.y & 0x007FFF;
+        let workspace_id = ((rect.loc.y >> 15) << 8) | (rect.loc.x >> 23);
+        let rect = Rectangle::from_loc_and_size((real_x, real_y), rect.size);
+        if workspace_id == 0 {
+            RichGeometry::Absolute(rect)
+        } else {
+            RichGeometry::Workspace(WorkspaceId::new_from_u32(workspace_id as u32), rect)
         }
     }
 }

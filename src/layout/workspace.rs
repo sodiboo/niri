@@ -95,6 +95,15 @@ impl WorkspaceId {
     fn next() -> WorkspaceId {
         WorkspaceId(WORKSPACE_ID_COUNTER.next())
     }
+
+    // Intentionally not exposed as From<u32> to avoid accidental misuse.
+    pub fn new_from_u32(id: u32) -> WorkspaceId {
+        WorkspaceId(id)
+    }
+
+    pub fn inner_u32(self) -> u32 {
+        self.0
+    }
 }
 
 niri_render_elements! {
