@@ -16,7 +16,8 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use super::{ResolvedWindowRules, WindowRef};
-use crate::handlers::xwayland::XUnwrap;
+use crate::handlers::xwayland::{RichGeometry, XUnwrap};
+use crate::layout::workspace::WorkspaceId;
 use crate::layout::LayoutElementRenderElement;
 use crate::niri::WindowOffscreenId;
 use crate::render_helpers::renderer::NiriRenderer;
@@ -144,19 +145,25 @@ impl crate::layout::LayoutElement for Mapped {
         }
     }
 
-    fn request_configure(&self, rect: Rectangle<i32, Logical>) {
+    fn request_configure(&self, workspace_id: WorkspaceId, rect: Rectangle<i32, Logical>) {
+        // The workspace ID is not necessary for Wayland windows, since only X11 has "override
+        // redirect" windows
         match self.window.underlying_surface() {
             WindowSurface::Wayland(toplevel) => toplevel.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Fullscreen);
                 state.size = Some(rect.size);
             }),
             WindowSurface::X11(surface) => {
-                // if surface.geometry().loc != rect.loc {
-                // debug!("configure {:?} #{:?}", surface.title(), surface.class());
-                // debug!("with new loc {:?}", rect.loc)
-                // }
                 surface.set_fullscreen(false).xunwrap();
-                surface.configure(rect).xunwrap();
+                let faked = RichGeometry::Workspace(workspace_id, rect).into_fake();
+                debug!(
+                    "configure x11 for workspace {}: fake: {:?}, real: {:?}",
+                    workspace_id.inner_u32(),
+                    faked,
+                    rect
+                );
+                surface.configure(faked).xunwrap();
+                debug!("new geometry: (fake) {:?}", surface.geometry());
             }
         }
     }

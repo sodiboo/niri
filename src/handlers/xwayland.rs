@@ -72,17 +72,17 @@ impl<E: Debug> XUnwrap for Result<(), E> {
 // A workspace id of 0 is reserved for window positions representing "screenspace" windows; i.e
 // notification toasts that appear in the corner of your monitor. Since clients may ignore their own
 // position and spawn windows like this, we must be able to handle them.
-#[derive(Debug, Clone)]
-enum RichGeometry {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RichGeometry {
     Absolute(Rectangle<i32, Logical>),
     Workspace(WorkspaceId, Rectangle<i32, Logical>),
 }
 
-impl State {
-    fn fake_override_redirect_geometry(&self, rect: RichGeometry) -> Rectangle<i32, Logical> {
-        match rect {
-            RichGeometry::Absolute(rect) => rect,
-            RichGeometry::Workspace(workspace_id, rect) => {
+impl RichGeometry {
+    pub fn into_fake(self) -> Rectangle<i32, Logical> {
+        match self {
+            Self::Absolute(rect) => rect,
+            Self::Workspace(workspace_id, rect) => {
                 let workspace_id = workspace_id.inner_u32() as i32;
                 let x = rect.loc.x | ((workspace_id & 0xFF) << 23);
                 let y = rect.loc.y | ((workspace_id >> 8) << 15);
@@ -91,15 +91,15 @@ impl State {
         }
     }
 
-    fn unfake_override_redirect_geometry(&self, rect: Rectangle<i32, Logical>) -> RichGeometry {
+    pub fn from_fake(rect: Rectangle<i32, Logical>) -> Self {
         let real_x = rect.loc.x & 0x7FFFFF;
         let real_y = rect.loc.y & 0x007FFF;
         let workspace_id = ((rect.loc.y >> 15) << 8) | (rect.loc.x >> 23);
         let rect = Rectangle::from_loc_and_size((real_x, real_y), rect.size);
         if workspace_id == 0 {
-            RichGeometry::Absolute(rect)
+            Self::Absolute(rect)
         } else {
-            RichGeometry::Workspace(WorkspaceId::new_from_u32(workspace_id as u32), rect)
+            Self::Workspace(WorkspaceId::new_from_u32(workspace_id as u32), rect)
         }
     }
 }
@@ -119,6 +119,11 @@ impl XwmHandler for State {
 
     fn map_window_notify(&mut self, _xwm: XwmId, window: X11Surface) {
         if window.is_override_redirect() {
+            debug!(
+                "override redirect mapped: fake: {:?}, real: {:?}",
+                window.geometry().loc,
+                RichGeometry::from_fake(window.geometry())
+            );
             self.niri.override_redirect.push(window.clone());
             self.niri.queue_redraw_all();
             return;
@@ -184,6 +189,12 @@ impl XwmHandler for State {
         if let Some(h) = h {
             geo.size.h = h as i32;
         }
+
+        debug!(
+            "override redirect reconfigure: fake: {:?}, real: {:?}",
+            window.geometry().loc,
+            RichGeometry::from_fake(window.geometry())
+        );
         let _ = window.configure(geo);
     }
 

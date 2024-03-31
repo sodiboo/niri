@@ -198,6 +198,8 @@ pub struct Column<W: LayoutElement> {
 
     /// Configurable properties of the layout.
     options: Rc<Options>,
+
+    workspace: WorkspaceId,
 }
 
 impl OutputId {
@@ -679,6 +681,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.options.clone(),
             width,
             is_full_width,
+            self.id,
         );
         let width = column.width();
         self.columns.insert(idx, column);
@@ -728,6 +731,7 @@ impl<W: LayoutElement> Workspace<W> {
             self.options.clone(),
             width,
             is_full_width,
+            self.id,
         );
         self.columns.insert(idx, column);
 
@@ -756,6 +760,8 @@ impl<W: LayoutElement> Workspace<W> {
 
         column.set_view_size(self.view_size, self.working_area);
         let width = column.width();
+        column.update_workspace(self.id);
+        column.update_tile_sizes();
         self.columns.insert(idx, column);
 
         if activate {
@@ -1313,6 +1319,7 @@ impl<W: LayoutElement> Workspace<W> {
                     self.options.clone(),
                     width,
                     is_full_width,
+                    self.id,
                 ),
             );
             if self.active_column_idx >= col_idx || target_window_was_focused {
@@ -1368,7 +1375,7 @@ impl<W: LayoutElement> Workspace<W> {
         let mut first = true;
 
         for (tile, tile_pos) in self.tiles_in_render_order() {
-            tile.request_tile_loc(tile_pos);
+            tile.request_tile_loc(self.id, tile_pos);
             // For the active tile (which comes first), draw the focus ring.
             let focus_ring = first;
             first = false;
@@ -1621,6 +1628,7 @@ impl<W: LayoutElement> Column<W> {
         options: Rc<Options>,
         width: ColumnWidth,
         is_full_width: bool,
+        workspace: WorkspaceId,
     ) -> Self {
         let mut rv = Self {
             tiles: vec![],
@@ -1632,6 +1640,7 @@ impl<W: LayoutElement> Column<W> {
             view_size,
             working_area,
             options,
+            workspace,
         };
 
         let is_pending_fullscreen = window.is_pending_fullscreen();
@@ -1643,6 +1652,10 @@ impl<W: LayoutElement> Column<W> {
         }
 
         rv
+    }
+
+    fn update_workspace(&mut self, workspace: WorkspaceId) {
+        self.workspace = workspace;
     }
 
     fn set_view_size(&mut self, size: Size<i32, Logical>, working_area: Rectangle<i32, Logical>) {
@@ -1893,7 +1906,7 @@ impl<W: LayoutElement> Column<W> {
             };
 
             let size = Size::from((width, height));
-            tile.request_tile_size(size);
+            tile.request_tile_size(self.workspace, size);
         }
     }
 

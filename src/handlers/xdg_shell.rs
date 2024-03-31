@@ -597,7 +597,7 @@ impl State {
                         state.states.set(xdg_toplevel::State::TiledBottom);
                     });
                 }
-                WindowSurface::X11(surface) => {}
+                WindowSurface::X11(_surface) => {}
             }
         }
 

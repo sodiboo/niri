@@ -99,6 +99,7 @@ use crate::dbus::gnome_shell_screenshot::{NiriToScreenshot, ScreenshotToNiri};
 use crate::dbus::mutter_screen_cast::{self, ScreenCastToNiri};
 use crate::frame_clock::FrameClock;
 use crate::handlers::configure_lock_surface;
+use crate::handlers::xwayland::RichGeometry;
 use crate::input::{
     apply_libinput_settings, mods_with_finger_scroll_binds, mods_with_wheel_binds, TabletData,
 };
@@ -2388,10 +2389,11 @@ impl Niri {
         elements.extend(self.override_redirect.iter().flat_map(|surface| {
             surface.render_elements(
                 renderer,
-                surface
-                    .geometry()
-                    .loc
-                    .to_physical_precise_round(output_scale),
+                match RichGeometry::from_fake(surface.geometry()) {
+                    RichGeometry::Absolute(rect) | RichGeometry::Workspace(_, rect) => rect,
+                }
+                .loc
+                .to_physical_precise_round(output_scale),
                 output_scale,
                 1.,
             )

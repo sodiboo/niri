@@ -15,7 +15,7 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::xwayland::{X11Surface, X11Wm};
+use smithay::xwayland::X11Wm;
 use smithay::{delegate_compositor, delegate_shm};
 
 use crate::niri::{ClientState, State};
@@ -223,11 +223,9 @@ impl CompositorHandler for State {
             // This is a commit of a non-toplevel root.
         }
 
-        // if surface.client().map_or(false, |c| c.is_xwayland()) {
-        //     debug!("commit of xwayland surface");
-        //     self.niri.queue_redraw_all();
-        //     return;
-        // }
+        if surface.client().map_or(false, |c| c.is_xwayland()) {
+            debug!("commit of xwayland surface");
+        }
 
         // This is a commit of a non-root or a non-toplevel root.
         let root_window_output = self.niri.layout.find_window_and_output(&root_surface);
@@ -246,6 +244,7 @@ impl CompositorHandler for State {
             .iter()
             .any(|w| w.wl_surface().as_ref() == Some(surface))
         {
+            debug!("commit of override-redirect window");
             self.niri.queue_redraw_all();
             return;
         }

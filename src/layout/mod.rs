@@ -45,7 +45,9 @@ use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 
 use self::monitor::Monitor;
 pub use self::monitor::MonitorRenderElement;
-use self::workspace::{compute_working_area, Column, ColumnWidth, OutputId, Workspace};
+use self::workspace::{
+    compute_working_area, Column, ColumnWidth, OutputId, Workspace, WorkspaceId,
+};
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::RenderTarget;
@@ -100,7 +102,7 @@ pub trait LayoutElement {
         target: RenderTarget,
     ) -> Vec<LayoutElementRenderElement<R>>;
 
-    fn request_configure(&self, rect: Rectangle<i32, Logical>);
+    fn request_configure(&self, workspace: WorkspaceId, rect: Rectangle<i32, Logical>);
     fn request_fullscreen(&self, size: Size<i32, Logical>);
     fn min_size(&self) -> Size<i32, Logical>;
     fn max_size(&self) -> Size<i32, Logical>;

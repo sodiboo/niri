@@ -9,6 +9,7 @@ use smithay::backend::renderer::element::{Element, Kind};
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
+use super::workspace::WorkspaceId;
 use super::{LayoutElement, LayoutElementRenderElement, Options};
 use crate::animation::Animation;
 use crate::niri_render_elements;
@@ -241,16 +242,16 @@ impl<W: LayoutElement> Tile<W> {
         activation_region.to_f64().contains(point)
     }
 
-    pub fn request_tile_loc(&self, loc: Point<i32, Logical>) {
+    pub fn request_tile_loc(&self, workspace: WorkspaceId, loc: Point<i32, Logical>) {
         if *self.latest_loc.borrow() == loc {
             return;
         }
         *self.latest_loc.borrow_mut() = loc;
 
-        self.request_tile_size(self.tile_size());
+        self.request_tile_size(workspace, self.tile_size());
     }
 
-    pub fn request_tile_size(&self, mut size: Size<i32, Logical>) {
+    pub fn request_tile_size(&self, workspace: WorkspaceId, mut size: Size<i32, Logical>) {
         // Can't go through effective_border_width() because we might be fullscreen.
         if !self.border.is_off() {
             let width = self.border.width();
@@ -258,10 +259,10 @@ impl<W: LayoutElement> Tile<W> {
             size.h = max(1, size.h - width * 2);
         }
 
-        self.window.request_configure(Rectangle::from_loc_and_size(
-            *self.latest_loc.borrow(),
-            size,
-        ));
+        self.window.request_configure(
+            workspace,
+            Rectangle::from_loc_and_size(*self.latest_loc.borrow(), size),
+        );
     }
 
     pub fn tile_width_for_window_width(&self, size: i32) -> i32 {
