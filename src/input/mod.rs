@@ -30,7 +30,7 @@ use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 
 use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
-use crate::niri::State;
+use crate::niri::{KeyboardFocus, State};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::spawn;
 use crate::utils::{center, get_monotonic_time, ResizeEdge};
@@ -287,6 +287,28 @@ impl State {
         Some(pos + target_geo.loc.to_f64())
     }
 
+    fn is_inhibiting_shortcuts(&self) -> bool {
+        if let KeyboardFocus::LayerShell { surface }
+        | KeyboardFocus::LockScreen {
+            surface: Some(surface),
+        }
+        | KeyboardFocus::Layout {
+            surface: Some(surface),
+        } = &self.niri.keyboard_focus
+        {
+            if let Some(inhibitor) = self
+                .niri
+                .keyboard_shortcuts_inhibiting_surfaces
+                .get(surface)
+            {
+                if inhibitor.is_active() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn on_keyboard<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
         let comp_mod = self.backend.mod_key();
 
@@ -306,6 +328,8 @@ impl State {
                 self.niri.event_loop.remove(token);
             }
         }
+
+        let is_inhibiting_shortcuts = self.is_inhibiting_shortcuts();
 
         let Some(Some(bind)) = self.niri.seat.get_keyboard().unwrap().input(
             self,
@@ -337,6 +361,7 @@ impl State {
                     *mods,
                     &this.niri.screenshot_ui,
                     this.niri.config.borrow().input.disable_power_key_handling,
+                    is_inhibiting_shortcuts,
                 )
             },
         ) else {
@@ -2304,6 +2329,7 @@ fn should_intercept_key(
     mods: ModifiersState,
     screenshot_ui: &ScreenshotUi,
     disable_power_key_handling: bool,
+    is_inhibiting_shortcuts: bool,
 ) -> FilterResult<Option<Bind>> {
     // Actions are only triggered on presses, release of the key
     // shouldn't try to intercept anything unless we have marked
@@ -2347,6 +2373,10 @@ fn should_intercept_key(
                 });
             }
         }
+    }
+
+    if is_inhibiting_shortcuts && !matches!(final_bind, Some(Bind { action: Action::ChangeVt(_), .. })) {
+        return FilterResult::Forward;
     }
 
     match (final_bind, pressed) {
@@ -2756,6 +2786,7 @@ mod tests {
                 mods,
                 &screenshot_ui,
                 disable_power_key_handling,
+                false,
             )
         };
 
@@ -2772,6 +2803,7 @@ mod tests {
                 mods,
                 &screenshot_ui,
                 disable_power_key_handling,
+                false,
             )
         };
 
