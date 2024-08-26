@@ -2375,7 +2375,15 @@ fn should_intercept_key(
         }
     }
 
-    if is_inhibiting_shortcuts && !matches!(final_bind, Some(Bind { action: Action::ChangeVt(_), .. })) {
+    if is_inhibiting_shortcuts
+        && !matches!(
+            final_bind,
+            Some(Bind {
+                action: Action::ChangeVt(_),
+                ..
+            })
+        )
+    {
         return FilterResult::Forward;
     }
 
