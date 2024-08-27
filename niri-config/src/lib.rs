@@ -1056,6 +1056,7 @@ pub struct Bind {
     pub repeat: bool,
     pub cooldown: Option<Duration>,
     pub allow_when_locked: bool,
+    pub allow_inhibiting: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -2671,6 +2672,7 @@ where
         let mut cooldown = None;
         let mut allow_when_locked = false;
         let mut allow_when_locked_node = None;
+        let mut allow_inhibiting = true;
         for (name, val) in &node.properties {
             match &***name {
                 "repeat" => {
@@ -2684,6 +2686,9 @@ where
                 "allow-when-locked" => {
                     allow_when_locked = knuffel::traits::DecodeScalar::decode(val, ctx)?;
                     allow_when_locked_node = Some(name);
+                }
+                "allow-inhibiting" => {
+                    allow_inhibiting = knuffel::traits::DecodeScalar::decode(val, ctx)?;
                 }
                 name_str => {
                     ctx.emit_error(DecodeError::unexpected(
@@ -2706,6 +2711,7 @@ where
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
+            allow_inhibiting: true,
         };
 
         if let Some(child) = children.next() {
@@ -2734,6 +2740,7 @@ where
                         repeat,
                         cooldown,
                         allow_when_locked,
+                        allow_inhibiting,
                     })
                 }
                 Err(e) => {
@@ -3095,7 +3102,7 @@ mod tests {
                 Mod+Comma { consume-window-into-column; }
                 Mod+1 { focus-workspace 1; }
                 Mod+Shift+1 { focus-workspace "workspace-1"; }
-                Mod+Shift+E { quit skip-confirmation=true; }
+                Mod+Shift+E allow-inhibiting=false { quit skip-confirmation=true; }
                 Mod+WheelScrollDown cooldown-ms=150 { focus-workspace-down; }
             }
 
@@ -3367,6 +3374,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: true,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3377,6 +3385,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3387,6 +3396,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3397,6 +3407,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3407,6 +3418,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3417,6 +3429,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3429,6 +3442,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                     Bind {
                         key: Key {
@@ -3439,6 +3453,7 @@ mod tests {
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
+                        allow_inhibiting: false,
                     },
                     Bind {
                         key: Key {
@@ -3449,6 +3464,7 @@ mod tests {
                         repeat: true,
                         cooldown: Some(Duration::from_millis(150)),
                         allow_when_locked: false,
+                        allow_inhibiting: true,
                     },
                 ]),
                 switch_events: SwitchBinds {
