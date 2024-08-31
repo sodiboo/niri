@@ -60,7 +60,7 @@ use smithay::{
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
     delegate_tablet_manager, delegate_text_input_manager, delegate_viewporter,
-    delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_xdg_activation,
 };
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
@@ -72,10 +72,11 @@ use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerSt
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};
 use crate::protocols::screencopy::{Screencopy, ScreencopyHandler, ScreencopyManagerState};
+use crate::protocols::virtual_keyboard::VirtualKeyboardHandler;
 use crate::utils::{output_size, send_scale_transform};
 use crate::{
     delegate_foreign_toplevel, delegate_gamma_control, delegate_mutter_x11_interop,
-    delegate_output_management, delegate_screencopy,
+    delegate_output_management, delegate_screencopy, delegate_virtual_keyboard,
 };
 
 impl SeatHandler for State {
@@ -184,7 +185,14 @@ impl InputMethodHandler for State {
 }
 
 delegate_input_method_manager!(State);
-delegate_virtual_keyboard_manager!(State);
+
+impl VirtualKeyboardHandler for State {
+    fn virtual_keyboard_manager_state(&mut self) -> &mut crate::protocols::virtual_keyboard::VirtualKeyboardManagerState {
+        &mut self.niri.virtual_keyboard_state
+    }
+}
+
+delegate_virtual_keyboard!(State);
 
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
