@@ -25,6 +25,7 @@ use smithay::input::pointer::{
 };
 use smithay::input::touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 
@@ -287,7 +288,7 @@ impl State {
         Some(pos + target_geo.loc.to_f64())
     }
 
-    fn is_inhibiting_shortcuts(&self) -> bool {
+    fn get_focused_keyboard_shortcuts_inhibitor(&self) -> Option<&KeyboardShortcutsInhibitor> {
         if let KeyboardFocus::LayerShell { surface }
         | KeyboardFocus::LockScreen {
             surface: Some(surface),
@@ -296,17 +297,17 @@ impl State {
             surface: Some(surface),
         } = &self.niri.keyboard_focus
         {
-            if let Some(inhibitor) = self
-                .niri
+            self.niri
                 .keyboard_shortcuts_inhibiting_surfaces
                 .get(surface)
-            {
-                if inhibitor.is_active() {
-                    return true;
-                }
-            }
+        } else {
+            None
         }
-        false
+    }
+
+    fn is_inhibiting_shortcuts(&self) -> bool {
+        self.get_focused_keyboard_shortcuts_inhibitor()
+            .map_or(false, KeyboardShortcutsInhibitor::is_active)
     }
 
     fn on_keyboard<I: InputBackend>(&mut self, event: I::KeyboardKeyEvent) {
@@ -560,6 +561,15 @@ impl State {
                             warn!("error taking screenshot: {err:?}");
                         }
                     });
+                }
+            }
+            Action::ToggleKeyboardShortcutsInhibit => {
+                if let Some(inhibitor) = self.get_focused_keyboard_shortcuts_inhibitor() {
+                    if inhibitor.is_active() {
+                        inhibitor.inactivate();
+                    } else {
+                        inhibitor.activate();
+                    }
                 }
             }
             Action::CloseWindow => {
