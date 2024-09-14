@@ -100,7 +100,7 @@ use smithay::wayland::xdg_activation::XdgActivationState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
 
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{Backend, RenderResult, Tty, Winit};
+use crate::backend::{self, Backend, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::gnome_shell_introspect::{self, IntrospectToNiri, NiriToIntrospect};
@@ -493,8 +493,21 @@ impl State {
             env::var_os("WAYLAND_DISPLAY").is_some() || env::var_os("DISPLAY").is_some();
 
         let mut backend = if has_display {
-            let winit = Winit::new(config.clone(), event_loop.clone())?;
-            Backend::Winit(winit)
+            if env::var_os("WAYLAND_DISPLAY").is_some()
+                && env::var_os("NIRI_WAYLAND_BACKEND").is_some()
+            {
+                // This isn't ready to be the default, so make sure the user knows what they're
+                // doing.
+                warn!("Running with the experimental Wayland backend");
+                let wayland = backend::WaylandBackend::new(config.clone(), event_loop.clone())?;
+                Backend::Wayland(wayland)
+            } else {
+                // But also, anyone on this branch probably wants to use the Wayland backend. So
+                // make sure they don't unknowingly use the winit backend.
+                warn!("Running with the winit backend");
+                let winit = Winit::new(config.clone(), event_loop.clone())?;
+                Backend::Winit(winit)
+            }
         } else {
             let tty = Tty::new(config.clone(), event_loop.clone())
                 .context("error initializing the TTY backend")?;

@@ -84,6 +84,7 @@ wayland-backend = "0.3.6"
 wayland-scanner = "0.31.4"
 xcursor = "0.3.6"
 zbus = { version = "~3.15.2", optional = true }
+smithay-client-toolkit = { git = "https://github.com/Smithay/client-toolkit", version = "0.19.2" }
 
 [dependencies.smithay]
 workspace = true
