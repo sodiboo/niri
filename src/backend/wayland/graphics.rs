@@ -14,8 +14,12 @@ use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use super::WaylandBackend;
 
-pub struct WaylandGraphicsBackend {
-    _display: EGLDisplay,
-}
+// pub struct WaylandGraphicsBackend {
+//     _display: EGLDisplay,
+// }
 
-impl WaylandGraphicsBackend {}
+// impl WaylandGraphicsBackend {
+//     pub fn new(display: EGLDisplay) -> Self {
+//         Self { _display: display }
+//     }
+// }

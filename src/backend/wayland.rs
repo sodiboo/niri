@@ -1,3 +1,5 @@
+#![allow(unused_imports, unused_variables)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -9,7 +11,6 @@ use std::{mem, path};
 
 use buffer::WaylandGraphicsBackend;
 use calloop::channel::Sender;
-use graphics::WaylandGraphicsBackend;
 use niri_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
@@ -218,7 +219,7 @@ impl WaylandBackend {
                 info!("got Ok(Some(_))");
                 self.main_window.attach(Some(&buf.buffer), 0, 0);
 
-                self.graphics = Some(WaylandGraphicsBackend::new(buf));
+                self.graphics = Some(buf);
             }
             Ok(None) => info!("got Ok(None)"),
             Err(err) => error!("err: {err:?}"),

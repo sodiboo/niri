@@ -14,9 +14,10 @@ use niri_config::{Config, OutputName};
 use smithay::backend::allocator::gbm::GbmDevice;
 use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::DrmNode;
-use smithay::backend::egl::context::PixelFormatRequirements;
+use smithay::backend::egl::context::{GlAttributes, PixelFormatRequirements};
+use smithay::backend::egl::display::EGLDisplayHandle;
 use smithay::backend::egl::native::EGLNativeSurface;
-use smithay::backend::egl::{EGLDevice, EGLDisplay};
+use smithay::backend::egl::{ffi, EGLContext, EGLDevice, EGLDisplay, EGLError, EGLSurface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
@@ -237,6 +238,17 @@ impl WaylandBackend {
             height as i32,
         )?;
 
+        let surface = unsafe {
+            EGLSurface::new(
+                &display,
+                context.pixel_format().unwrap(),
+                context.config_id(),
+                WaylandBackendNativeSurface(surface),
+            )
+        }?;
+
+        // let renderer = GlesRenderer::new(display, context, surface)?;
+
         Ok(Some(WaylandGraphicsBackend {
             backing: Arc::new(
                 Dmabuf {
@@ -337,24 +349,29 @@ unsafe impl EGLNativeSurface for WaylandBackendNativeSurface {
     unsafe fn create(
         &self,
         display: &Arc<EGLDisplayHandle>,
-        config_id: smithay::backend::ffi::egl::types::EGLConfig,
-    ) -> Result<*const c_void, super::EGLError> {
+        config_id: ffi::egl::types::EGLConfig,
+    ) -> Result<*const std::ffi::c_void, EGLError> {
         smithay::backend::egl::wrap_egl_call_ptr(|| unsafe {
             smithay::backend::egl::ffi::egl::CreatePlatformWindowSurfaceEXT(
                 display.handle,
                 config_id,
-                self.ptr() as *mut _,
-                WINIT_SURFACE_ATTRIBUTES.as_ptr(),
+                self.0.ptr() as *mut _,
+                [
+                    ffi::egl::RENDER_BUFFER as std::ffi::c_int,
+                    ffi::egl::BACK_BUFFER as std::ffi::c_int,
+                    ffi::egl::NONE as std::ffi::c_int,
+                ]
+                .as_ptr(),
             )
         })
     }
 
     fn resize(&self, width: i32, height: i32, dx: i32, dy: i32) -> bool {
-        wegl::WlEglSurface::resize(self, width, height, dx, dy);
+        WlEglSurface::resize(&self.0, width, height, dx, dy);
         true
     }
 
     fn identifier(&self) -> Option<String> {
-        Some("Winit/Wayland".into())
+        Some("niri/nested".into())
     }
 }
