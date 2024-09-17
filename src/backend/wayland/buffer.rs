@@ -13,12 +13,16 @@ use calloop::channel::Sender;
 use niri_config::{Config, OutputName};
 use smithay::backend::allocator::gbm::GbmDevice;
 use smithay::backend::allocator::{Fourcc, Modifier};
-use smithay::backend::egl::EGLDisplay;
+use smithay::backend::drm::DrmNode;
+use smithay::backend::egl::context::PixelFormatRequirements;
+use smithay::backend::egl::native::EGLNativeSurface;
+use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{Physical, Size};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::dmabuf::{DmabufFeedback, DmabufHandler, DmabufState};
@@ -28,7 +32,7 @@ use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_buffer::{self, WlBuffer};
 use smithay_client_toolkit::reexports::client::protocol::wl_shm;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
-use smithay_client_toolkit::reexports::client::{delegate_dispatch, delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
+use smithay_client_toolkit::reexports::client::{delegate_dispatch, delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use smithay_client_toolkit::reexports::csd_frame::WindowState;
 use smithay_client_toolkit::reexports::protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1;
 use smithay_client_toolkit::reexports::protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
@@ -39,6 +43,7 @@ use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::raw::RawPool;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
+use wayland_egl::WlEglSurface;
 
 use super::WaylandBackend;
 
@@ -52,10 +57,11 @@ pub struct Plane {
 
 #[derive(Debug)]
 pub struct Dmabuf {
+    pub display: EGLDisplay,
     pub width: i32,
     pub height: i32,
     pub planes: Vec<Plane>,
-    pub format: u32,
+    pub format: Fourcc,
     pub modifier: u64,
 }
 
@@ -87,7 +93,7 @@ impl From<Dmabuf> for BufferSource {
     }
 }
 
-pub struct Buffer {
+pub struct WaylandGraphicsBackend {
     pub backing: Arc<BufferSource>,
     pub buffer: WlBuffer,
     pub size: (u32, u32),
@@ -100,7 +106,7 @@ impl WaylandBackend {
         width: u32,
         height: u32,
         stride: u32,
-    ) -> anyhow::Result<Buffer> {
+    ) -> anyhow::Result<WaylandGraphicsBackend> {
         let mut pool = RawPool::new((stride * height) as usize, &self.shm_state)?;
 
         let buffer = pool.create_buffer(
@@ -113,7 +119,7 @@ impl WaylandBackend {
             &self.qh,
         );
 
-        Ok(Buffer {
+        Ok(WaylandGraphicsBackend {
             backing: Arc::new(
                 Shmbuf {
                     pool,
@@ -130,17 +136,15 @@ impl WaylandBackend {
         })
     }
 
-    fn create_gbm_buffer(
+    pub fn create_gbm_buffer(
         &self,
-        format: u32,
-        modifiers: &[u64],
+        gbm: GbmDevice<fs::File>,
+        feedback: DmabufFeedback,
+        format: Fourcc,
+        // modifiers: &[u64],
         (width, height): (u32, u32),
         needs_linear: bool,
-    ) -> anyhow::Result<Option<Buffer>> {
-        let (Some((_, gbm)), Some(feedback)) = (self.gbm.as_ref(), self.dmabuf_feedback.as_ref())
-        else {
-            return Ok(None);
-        };
+    ) -> anyhow::Result<Option<WaylandGraphicsBackend>> {
         let formats = feedback.format_table();
 
         let modifiers = feedback
@@ -149,30 +153,29 @@ impl WaylandBackend {
             .flat_map(|x| &x.formats)
             .filter_map(|x| formats.get(*x as usize))
             .filter(|x| {
-                x.format == format && (!needs_linear || x.modifier == u64::from(Modifier::Linear))
+                x.format == format as u32
+                    && (!needs_linear || x.modifier == u64::from(Modifier::Linear))
             })
             .map(|x| Modifier::from(x.modifier))
-            .filter(|x| modifiers.contains(&u64::from(*x)))
+            // .filter(|x| modifiers.contains(&u64::from(*x)))
             .collect::<Vec<_>>();
 
         if modifiers.is_empty() {
             return Ok(None);
         };
-        let gbm_format = Fourcc::try_from(format)?;
         //dbg!(format, modifiers);
         let bo = if !modifiers.iter().all(|x| *x == Modifier::Invalid) {
             gbm.create_buffer_object_with_modifiers::<()>(
                 width,
                 height,
-                gbm_format,
+                format,
                 modifiers.iter().copied(),
             )?
         } else {
-            // TODO make sure this isn't used across different GPUs
             gbm.create_buffer_object::<()>(
                 width,
                 height,
-                gbm_format,
+                format,
                 smithay::backend::allocator::gbm::GbmBufferFlags::empty(),
             )?
         };
@@ -199,19 +202,45 @@ impl WaylandBackend {
                 stride: plane_stride,
             });
         }
+
         let buffer = params
             .create_immed(
                 width as i32,
                 height as i32,
-                format,
+                format as u32,
                 zwp_linux_buffer_params_v1::Flags::empty(),
                 &self.qh,
             )
             .0;
 
-        Ok(Some(Buffer {
+        let display = unsafe { EGLDisplay::new(gbm) }?;
+
+        let gl_attributes = GlAttributes {
+            version: (3, 0),
+            profile: None,
+            debug: cfg!(debug_assertions),
+            vsync: false,
+        };
+
+        let context = EGLContext::new_with_config(
+            &display,
+            gl_attributes,
+            PixelFormatRequirements::_10_bit(),
+        )
+        .or_else(|_| {
+            EGLContext::new_with_config(&display, gl_attributes, PixelFormatRequirements::_8_bit())
+        })?;
+
+        let surface = WlEglSurface::new(
+            self.main_window.wl_surface().id(),
+            width as i32,
+            height as i32,
+        )?;
+
+        Ok(Some(WaylandGraphicsBackend {
             backing: Arc::new(
                 Dmabuf {
+                    display,
                     width: width as i32,
                     height: height as i32,
                     planes,
@@ -252,21 +281,21 @@ impl DmabufHandler for WaylandBackend {
         _proxy: &ZwpLinuxDmabufFeedbackV1,
         feedback: DmabufFeedback,
     ) {
-        if self.gbm.is_none() {
-            #[allow(clippy::unnecessary_cast)]
-            match find_gbm_device(feedback.main_device() as u64) {
-                Ok(Some(gbm)) => {
-                    self.gbm = Some(gbm);
-                }
-                Ok(None) => {
-                    error!("Gbm main device '{}' not found", feedback.main_device());
-                }
-                Err(err) => {
-                    error!("Failed to open gbm main device: {}", err);
-                }
+        #[allow(clippy::unnecessary_cast)]
+        match find_gbm_device(feedback.main_device() as u64) {
+            Ok(Some((path, device))) => {
+                self.got_gbm_device(path, device, feedback);
+                return;
+            }
+            Ok(None) => {
+                error!("Gbm main device '{}' not found", feedback.main_device());
+            }
+            Err(err) => {
+                error!("Failed to open gbm main device: {}", err);
             }
         }
-        self.dmabuf_feedback = Some(feedback);
+
+        self.failed_gbm_device(feedback);
     }
 
     fn created(
@@ -276,7 +305,7 @@ impl DmabufHandler for WaylandBackend {
         params: &smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
         buffer: smithay_client_toolkit::reexports::client::protocol::wl_buffer::WlBuffer,
     ) {
-        todo!()
+        info!("Dmabuf created: {:?}", buffer);
     }
 
     fn failed(
@@ -285,7 +314,7 @@ impl DmabufHandler for WaylandBackend {
         qh: &QueueHandle<Self>,
         params: &smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
     ) {
-        todo!()
+        error!("Dmabuf failed: {:?}", params);
     }
 
     fn released(
@@ -294,8 +323,38 @@ impl DmabufHandler for WaylandBackend {
         qh: &QueueHandle<Self>,
         buffer: &smithay_client_toolkit::reexports::client::protocol::wl_buffer::WlBuffer,
     ) {
-        todo!()
+        info!("Dmabuf released: {:?}", buffer);
     }
 }
 
 smithay_client_toolkit::delegate_dmabuf!(WaylandBackend);
+
+// WlEglSurface impl is used by the winit backend
+// We don't want to depend on winit backend indirectly.
+struct WaylandBackendNativeSurface(WlEglSurface);
+
+unsafe impl EGLNativeSurface for WaylandBackendNativeSurface {
+    unsafe fn create(
+        &self,
+        display: &Arc<EGLDisplayHandle>,
+        config_id: smithay::backend::ffi::egl::types::EGLConfig,
+    ) -> Result<*const c_void, super::EGLError> {
+        smithay::backend::egl::wrap_egl_call_ptr(|| unsafe {
+            smithay::backend::egl::ffi::egl::CreatePlatformWindowSurfaceEXT(
+                display.handle,
+                config_id,
+                self.ptr() as *mut _,
+                WINIT_SURFACE_ATTRIBUTES.as_ptr(),
+            )
+        })
+    }
+
+    fn resize(&self, width: i32, height: i32, dx: i32, dy: i32) -> bool {
+        wegl::WlEglSurface::resize(self, width, height, dx, dy);
+        true
+    }
+
+    fn identifier(&self) -> Option<String> {
+        Some("Winit/Wayland".into())
+    }
+}

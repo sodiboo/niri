@@ -20,6 +20,7 @@ use smithay_client_toolkit::session_lock::SessionLockHandler;
 use smithay_client_toolkit::shell::wlr_layer::LayerShellHandler;
 use smithay_client_toolkit::shell::xdg::window::WindowHandler;
 use smithay_client_toolkit::shell::xdg::XdgSurface;
+use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 
 use super::{WaylandBackend, WaylandBackendEvent};
@@ -112,10 +113,12 @@ impl WindowHandler for WaylandBackend {
         configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
         serial: u32,
     ) {
-        if window != &self.graphics.window {
+        if window != &self.main_window {
             error!("Received a configure request for an unknown window.");
             return;
         }
+        // if let Some(graphics) = self.graphics.as_ref() {
+        // }
         let width = configure
             .new_size
             .0
@@ -130,7 +133,11 @@ impl WindowHandler for WaylandBackend {
         let new_size = Size::<_, Physical>::from((width, height));
 
         if new_size != self.output_size {
+            info!("Output size changed to {:?}", new_size);
             self.output_size = new_size;
+            self.dmabuf_state
+                .get_surface_feedback(self.main_window.wl_surface(), &qh)
+                .unwrap();
         }
 
         // let dmabuf = Dmabuf::builder((600, 800));

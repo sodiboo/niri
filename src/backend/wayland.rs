@@ -1,24 +1,27 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::mem;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{mem, path};
 
+use buffer::WaylandGraphicsBackend;
 use calloop::channel::Sender;
 use graphics::WaylandGraphicsBackend;
 use niri_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
-use smithay::backend::egl::EGLDisplay;
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
+use smithay::reexports::gbm::Format;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::utils::{Physical, Size};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
@@ -26,6 +29,7 @@ use smithay_client_toolkit::dmabuf::{DmabufFeedback, DmabufState};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
+use smithay_client_toolkit::reexports::client::protocol::wl_shm;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, EventQueue, QueueHandle};
 use smithay_client_toolkit::reexports::csd_frame::WindowState;
@@ -65,7 +69,6 @@ pub struct WaylandBackend {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
     dmabuf_feedback: Option<DmabufFeedback>,
-    gbm: Option<(PathBuf, GbmDevice<std::fs::File>)>,
 
     main_window: Window,
 
@@ -136,26 +139,28 @@ impl WaylandBackend {
         });
 
         let physical_properties = output.physical_properties();
-        let ipc_outputs = Arc::new(Mutex::new(HashMap::from([(
-            OutputId::next(),
-            niri_ipc::Output {
-                name: output.name(),
-                make: physical_properties.make,
-                model: physical_properties.model,
-                serial: None,
-                physical_size: None,
-                modes: vec![niri_ipc::Mode {
-                    width: 0,
-                    height: 0,
-                    refresh_rate: 60_000,
-                    is_preferred: true,
-                }],
-                current_mode: Some(0),
-                vrr_supported: false,
-                vrr_enabled: false,
-                logical: Some(logical_output(&output)),
-            },
-        )])));
+        let ipc_outputs = Arc::new(Mutex::new(HashMap::from([
+        //     (
+        //     OutputId::next(),
+        //     niri_ipc::Output {
+        //         name: output.name(),
+        //         make: physical_properties.make,
+        //         model: physical_properties.model,
+        //         serial: None,
+        //         physical_size: None,
+        //         modes: vec![niri_ipc::Mode {
+        //             width: 0,
+        //             height: 0,
+        //             refresh_rate: 60_000,
+        //             is_preferred: true,
+        //         }],
+        //         current_mode: Some(0),
+        //         vrr_supported: false,
+        //         vrr_enabled: false,
+        //         logical: Some(logical_output(&output)),
+        //     },
+        // )
+        ])));
 
         let damage_tracker = OutputDamageTracker::from_output(&output);
 
@@ -164,7 +169,7 @@ impl WaylandBackend {
         let main_window =
             xdg_state.create_window(output_surface, WindowDecorations::ServerDefault, &qh);
 
-        dmabuf_state.get_surface_feedback(main_window.wl_surface(), &qh)?;
+        main_window.commit();
 
         Ok(Self {
             config,
@@ -184,7 +189,6 @@ impl WaylandBackend {
             ipc_outputs,
 
             dmabuf_feedback: None,
-            gbm: None,
 
             output_size: (0, 0).into(),
 
@@ -193,6 +197,35 @@ impl WaylandBackend {
             graphics: None,
         })
     }
+
+    fn got_gbm_device(
+        &mut self,
+        path: PathBuf,
+        gbm: GbmDevice<std::fs::File>,
+        feedback: DmabufFeedback,
+    ) {
+        info!("Got gbm device from dmabuf feedback");
+        let surface = self.create_gbm_buffer(
+            gbm,
+            feedback,
+            Fourcc::Abgr8888,
+            (self.output_size.w, self.output_size.h),
+            false,
+        );
+
+        match surface {
+            Ok(Some(buf)) => {
+                info!("got Ok(Some(_))");
+                self.main_window.attach(Some(&buf.buffer), 0, 0);
+
+                self.graphics = Some(WaylandGraphicsBackend::new(buf));
+            }
+            Ok(None) => info!("got Ok(None)"),
+            Err(err) => error!("err: {err:?}"),
+        }
+    }
+
+    fn failed_gbm_device(&mut self, feedback: DmabufFeedback) {}
 
     pub fn init(&mut self, niri: &mut Niri) {
         //     let renderer = self.backend.renderer();
