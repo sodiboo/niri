@@ -17,7 +17,7 @@ use smithay::backend::drm::DrmNode;
 use smithay::backend::egl::context::{GlAttributes, PixelFormatRequirements};
 use smithay::backend::egl::display::EGLDisplayHandle;
 use smithay::backend::egl::native::EGLNativeSurface;
-use smithay::backend::egl::{ffi, EGLContext, EGLDevice, EGLDisplay, EGLError, EGLSurface};
+use smithay::backend::egl::{ffi, wrap_egl_call_ptr, EGLContext, EGLDevice, EGLDisplay, EGLError, EGLSurface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
@@ -241,20 +241,26 @@ impl WaylandBackend {
             EGLContext::new_with_config(&display, gl_attributes, PixelFormatRequirements::_8_bit())
         })?;
 
-        // let surface = WlEglSurface::new(
-        //     self.main_window.wl_surface().id(),
-        //     width as i32,
-        //     height as i32,
-        // )?;
+        debug!("a");
 
-        // let surface = unsafe {
-        //     EGLSurface::new(
-        //         &display,
-        //         context.pixel_format().unwrap(),
-        //         context.config_id(),
-        //         WaylandBackendNativeSurface(surface),
-        //     )
-        // }?;
+        let surface = WlEglSurface::new(
+            self.main_window.wl_surface().id(),
+            width as i32,
+            height as i32,
+        )?;
+
+        debug!("b");
+
+        let surface = unsafe {
+            EGLSurface::new(
+                &display,
+                context.pixel_format().unwrap(),
+                context.config_id(),
+                WaylandBackendNativeSurface(surface),
+            )
+        }?;
+
+        debug!("c");
 
         let renderer = unsafe { GlesRenderer::new(context) }?;
 
@@ -361,17 +367,19 @@ unsafe impl EGLNativeSurface for WaylandBackendNativeSurface {
         display: &Arc<EGLDisplayHandle>,
         config_id: ffi::egl::types::EGLConfig,
     ) -> Result<*const std::ffi::c_void, EGLError> {
-        smithay::backend::egl::wrap_egl_call_ptr(|| unsafe {
-            smithay::backend::egl::ffi::egl::CreatePlatformWindowSurfaceEXT(
+        const SURFACE_ATTRIBUTES: [std::ffi::c_int; 3] = [
+            ffi::egl::RENDER_BUFFER as std::ffi::c_int,
+            ffi::egl::BACK_BUFFER as std::ffi::c_int,
+            ffi::egl::NONE as std::ffi::c_int,
+        ];
+
+        wrap_egl_call_ptr(|| unsafe {
+            debug!("Creating EGL surface");
+            ffi::egl::CreatePlatformWindowSurfaceEXT(
                 display.handle,
                 config_id,
                 self.0.ptr() as *mut _,
-                [
-                    ffi::egl::RENDER_BUFFER as std::ffi::c_int,
-                    ffi::egl::BACK_BUFFER as std::ffi::c_int,
-                    ffi::egl::NONE as std::ffi::c_int,
-                ]
-                .as_ptr(),
+                SURFACE_ATTRIBUTES.as_ptr(),
             )
         })
     }

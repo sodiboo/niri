@@ -14,7 +14,7 @@ use calloop::channel::Sender;
 use niri_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::GbmDevice;
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -64,7 +64,7 @@ pub struct WaylandBackend {
     dmabuf_state: DmabufState,
 
     output: Output,
-    output_size: Size<u32, Physical>,
+    output_size: Size<i32, Physical>,
     // graphics: WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: OutputDamageTracker,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -78,6 +78,8 @@ pub struct WaylandBackend {
 
 pub enum WaylandBackendEvent {
     CloseRequest,
+    Init,
+    Resized(Size<i32, Physical>),
 }
 
 impl WaylandBackend {
@@ -111,6 +113,63 @@ impl WaylandBackend {
                     WaylandBackendEvent::CloseRequest => {
                         state.niri.stop_signal.stop();
                     }
+                    WaylandBackendEvent::Init => {
+                        let backend = state.backend.wayland();
+                        let graphics = backend.graphics.as_mut().unwrap();
+                        let renderer = graphics.renderer();
+                        if let Err(err) = renderer.bind_wl_display(&state.niri.display_handle) {
+                            warn!("error binding renderer wl_display: {err}");
+                        }
+
+                        resources::init(renderer);
+                        shaders::init(renderer);
+
+                        let config = backend.config.borrow();
+                        if let Some(src) = config.animations.window_resize.custom_shader.as_deref()
+                        {
+                            shaders::set_custom_resize_program(renderer, Some(src));
+                        }
+                        if let Some(src) = config.animations.window_close.custom_shader.as_deref() {
+                            shaders::set_custom_close_program(renderer, Some(src));
+                        }
+                        if let Some(src) = config.animations.window_open.custom_shader.as_deref() {
+                            shaders::set_custom_open_program(renderer, Some(src));
+                        }
+                        drop(config);
+
+                        state.niri.layout.update_shaders();
+
+                        state.niri.add_output(backend.output.clone(), None, false);
+                    }
+                    WaylandBackendEvent::Resized(size) => {
+                        let backend = state.backend.wayland();
+                        backend.output_size = size;
+
+                        backend.output.change_current_state(
+                            Some(Mode {
+                                size,
+                                refresh: 60_000,
+                            }),
+                            None,
+                            None,
+                            None,
+                        );
+
+                        {
+                            let mut ipc_outputs = backend.ipc_outputs.lock().unwrap();
+                            let output = ipc_outputs.values_mut().next().unwrap();
+                            let mode = &mut output.modes[0];
+                            mode.width = size.w.clamp(0, u16::MAX as i32) as u16;
+                            mode.height = size.h.clamp(0, u16::MAX as i32) as u16;
+                            if let Some(logical) = output.logical.as_mut() {
+                                logical.width = size.w as u32;
+                                logical.height = size.h as u32;
+                            }
+                            state.niri.ipc_outputs_changed = true;
+                        }
+
+                        state.niri.output_resized(&backend.output);
+                    }
                 }
             })
             .unwrap();
@@ -125,12 +184,19 @@ impl WaylandBackend {
         let output = Output::new(
             "nested niri".to_string(),
             PhysicalProperties {
-                size: (1280, 720).into(),
+                size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
                 make: "Smithay".into(),
                 model: "niri".into(),
             },
         );
+
+        let mode = Mode {
+            size: (0, 0).into(),
+            refresh: 60_000,
+        };
+        output.change_current_state(Some(mode), None, None, None);
+        output.set_preferred(mode);
 
         output.user_data().insert_if_missing(|| OutputName {
             connector: "nested".to_string(),
@@ -140,28 +206,26 @@ impl WaylandBackend {
         });
 
         let physical_properties = output.physical_properties();
-        let ipc_outputs = Arc::new(Mutex::new(HashMap::from([
-        //     (
-        //     OutputId::next(),
-        //     niri_ipc::Output {
-        //         name: output.name(),
-        //         make: physical_properties.make,
-        //         model: physical_properties.model,
-        //         serial: None,
-        //         physical_size: None,
-        //         modes: vec![niri_ipc::Mode {
-        //             width: 0,
-        //             height: 0,
-        //             refresh_rate: 60_000,
-        //             is_preferred: true,
-        //         }],
-        //         current_mode: Some(0),
-        //         vrr_supported: false,
-        //         vrr_enabled: false,
-        //         logical: Some(logical_output(&output)),
-        //     },
-        // )
-        ])));
+        let ipc_outputs = Arc::new(Mutex::new(HashMap::from([(
+            OutputId::next(),
+            niri_ipc::Output {
+                name: output.name(),
+                make: physical_properties.make,
+                model: physical_properties.model,
+                serial: None,
+                physical_size: None,
+                modes: vec![niri_ipc::Mode {
+                    width: 0,
+                    height: 0,
+                    refresh_rate: 60_000,
+                    is_preferred: true,
+                }],
+                current_mode: Some(0),
+                vrr_supported: false,
+                vrr_enabled: false,
+                logical: Some(logical_output(&output)),
+            },
+        )])));
 
         let damage_tracker = OutputDamageTracker::from_output(&output);
 
@@ -170,7 +234,9 @@ impl WaylandBackend {
         let main_window =
             xdg_state.create_window(output_surface, WindowDecorations::ServerDefault, &qh);
 
-        main_window.commit();
+        dmabuf_state
+            .get_surface_feedback(main_window.wl_surface(), &qh)
+            .unwrap();
 
         Ok(Self {
             config,
@@ -191,12 +257,24 @@ impl WaylandBackend {
 
             dmabuf_feedback: None,
 
-            output_size: (0, 0).into(),
+            output_size: (1, 1).into(),
 
             main_window,
 
             graphics: None,
         })
+    }
+
+    fn reconfigured_output(&mut self) {
+        self.output.change_current_state(
+            Some(Mode {
+                size: self.output_size,
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
     }
 
     fn got_gbm_device(
@@ -205,11 +283,18 @@ impl WaylandBackend {
         gbm: GbmDevice<std::fs::File>,
         feedback: DmabufFeedback,
     ) {
+        // for format in feedback.format_table() {
+        //     debug!(
+        //         "{:?} -> {:?}",
+        //         Fourcc::try_from(format.format).ok(),
+        //         Modifier::try_from(format.modifier).ok()
+        //     );
+        // }
         let surface = self.create_gbm_buffer(
             gbm,
             feedback,
             Fourcc::Abgr8888,
-            (self.output_size.w, self.output_size.h),
+            (self.output_size.w as u32, self.output_size.h as u32),
             false,
         );
 
@@ -219,6 +304,8 @@ impl WaylandBackend {
                 self.main_window.commit();
 
                 self.graphics = Some(buf);
+
+                self.events.send(WaylandBackendEvent::Init);
             }
             Ok(None) => info!("got Ok(None)"),
             Err(err) => error!("err: {err:?}"),
@@ -228,29 +315,7 @@ impl WaylandBackend {
     fn failed_gbm_device(&mut self, feedback: DmabufFeedback) {}
 
     pub fn init(&mut self, niri: &mut Niri) {
-        //     let renderer = self.backend.renderer();
-        //     if let Err(err) = renderer.bind_wl_display(&niri.display_handle) {
-        //         warn!("error binding renderer wl_display: {err}");
-        //     }
-
-        //     resources::init(renderer);
-        //     shaders::init(renderer);
-
-        //     let config = self.config.borrow();
-        //     if let Some(src) = config.animations.window_resize.custom_shader.as_deref() {
-        //         shaders::set_custom_resize_program(renderer, Some(src));
-        //     }
-        //     if let Some(src) = config.animations.window_close.custom_shader.as_deref() {
-        //         shaders::set_custom_close_program(renderer, Some(src));
-        //     }
-        //     if let Some(src) = config.animations.window_open.custom_shader.as_deref() {
-        //         shaders::set_custom_open_program(renderer, Some(src));
-        //     }
-        //     drop(config);
-
-        //     niri.layout.update_shaders();
-
-        //     niri.add_output(self.output.clone(), None, false);
+        // We don't have the renderer yet :(
     }
 
     pub fn seat_name(&self) -> String {
@@ -269,7 +334,8 @@ impl WaylandBackend {
     pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
         let _span = tracy_client::span!("WaylandBackend::render");
 
-        let Some(renderer) = self.backend.map(|backend| backend.renderer()) else {
+        let Some(renderer) = self.graphics.as_mut().map(|graphics| graphics.renderer()) else {
+            warn!("render() before graphics initialized");
             return RenderResult::Skipped;
         };
 
@@ -277,73 +343,74 @@ impl WaylandBackend {
         let mut elements =
             niri.render::<GlesRenderer>(renderer, output, true, RenderTarget::Output);
 
-        // TODO: stuff from this point on lol
-
         // Visualize the damage, if enabled.
         if niri.debug_draw_damage {
             let output_state = niri.output_state.get_mut(output).unwrap();
             draw_damage(&mut output_state.debug_damage_tracker, &mut elements);
         }
 
-        // Hand them over to winit.
-        self.backend.bind().unwrap();
-        let age = self.backend.buffer_age().unwrap();
-        let res = self
-            .damage_tracker
-            .render_output(renderer, age, &elements, [0.; 4])
-            .unwrap();
+        // // Hand them over to winit.
+        // self.backend.bind().unwrap();
+        // let age = self.backend.buffer_age().unwrap();
+        // let res = self
+        //     .damage_tracker
+        //     .render_output(renderer, age, &elements, [0.; 4])
+        //     .unwrap();
 
-        niri.update_primary_scanout_output(output, &res.states);
+        // niri.update_primary_scanout_output(output, &res.states);
 
-        let rv;
-        if let Some(damage) = res.damage {
-            if self
-                .config
-                .borrow()
-                .debug
-                .wait_for_frame_completion_before_queueing
-            {
-                let _span = tracy_client::span!("wait for completion");
-                if let Err(err) = res.sync.wait() {
-                    warn!("error waiting for frame completion: {err:?}");
-                }
-            }
+        // let rv;
+        // if let Some(damage) = res.damage {
+        //     if self
+        //         .config
+        //         .borrow()
+        //         .debug
+        //         .wait_for_frame_completion_before_queueing
+        //     {
+        //         let _span = tracy_client::span!("wait for completion");
+        //         if let Err(err) = res.sync.wait() {
+        //             warn!("error waiting for frame completion: {err:?}");
+        //         }
+        //     }
 
-            self.backend.submit(Some(damage)).unwrap();
+        //     self.backend.submit(Some(damage)).unwrap();
 
-            let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
-            let mode = output.current_mode().unwrap();
-            let refresh = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
-            presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
-                get_monotonic_time(),
-                refresh,
-                0,
-                wp_presentation_feedback::Kind::empty(),
-            );
+        //     let mut presentation_feedbacks = niri.take_presentation_feedbacks(output,
+        // &res.states);     let mode = output.current_mode().unwrap();
+        //     let refresh = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
+        //     presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
+        //         get_monotonic_time(),
+        //         refresh,
+        //         0,
+        //         wp_presentation_feedback::Kind::empty(),
+        //     );
 
-            rv = RenderResult::Submitted;
-        } else {
-            rv = RenderResult::NoDamage;
-        }
+        //     rv = RenderResult::Submitted;
+        // } else {
+        //     rv = RenderResult::NoDamage;
+        // }
 
-        let output_state = niri.output_state.get_mut(output).unwrap();
-        match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
-            RedrawState::Idle => unreachable!(),
-            RedrawState::Queued => (),
-            RedrawState::WaitingForVBlank { .. } => unreachable!(),
-            RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
-            RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
-        }
+        // let output_state = niri.output_state.get_mut(output).unwrap();
+        // match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
+        //     RedrawState::Idle => unreachable!(),
+        //     RedrawState::Queued => (),
+        //     RedrawState::WaitingForVBlank { .. } => unreachable!(),
+        //     RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
+        //     RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
+        // }
 
-        output_state.frame_callback_sequence = output_state.frame_callback_sequence.wrapping_add(1);
+        // output_state.frame_callback_sequence =
+        // output_state.frame_callback_sequence.wrapping_add(1);
 
-        // FIXME: this should wait until a frame callback from the host compositor, but it redraws
-        // right away instead.
-        if output_state.unfinished_animations_remain {
-            self.backend.window().request_redraw();
-        }
+        // // FIXME: this should wait until a frame callback from the host compositor, but it
+        // redraws // right away instead.
+        // if output_state.unfinished_animations_remain {
+        //     self.backend.window().request_redraw();
+        // }
 
-        rv
+        // rv
+
+        todo!()
     }
 
     pub fn toggle_debug_tint(&mut self) {

@@ -117,27 +117,23 @@ impl WindowHandler for WaylandBackend {
             error!("Received a configure request for an unknown window.");
             return;
         }
-        // if let Some(graphics) = self.graphics.as_ref() {
-        // }
         let width = configure
             .new_size
             .0
-            .map(Into::into)
+            .map(u32::from)
+            .map(|x| x as i32)
             .unwrap_or(self.output_size.w);
         let height = configure
             .new_size
             .1
-            .map(Into::into)
+            .map(u32::from)
+            .map(|x| x as i32)
             .unwrap_or(self.output_size.h);
 
         let new_size = Size::<_, Physical>::from((width, height));
 
         if new_size != self.output_size {
-            info!("Output size changed to {:?}", new_size);
-            self.output_size = new_size;
-            self.dmabuf_state
-                .get_surface_feedback(self.main_window.wl_surface(), &qh)
-                .unwrap();
+            self.events.send(WaylandBackendEvent::Resized(new_size));
         }
 
         // let dmabuf = Dmabuf::builder((600, 800));
