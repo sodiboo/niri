@@ -59,6 +59,7 @@ pub struct Plane {
 #[derive(Debug)]
 pub struct Dmabuf {
     pub display: EGLDisplay,
+    pub renderer: GlesRenderer,
     pub width: i32,
     pub height: i32,
     pub planes: Vec<Plane>,
@@ -95,9 +96,18 @@ impl From<Dmabuf> for BufferSource {
 }
 
 pub struct WaylandGraphicsBackend {
-    pub backing: Arc<BufferSource>,
+    pub backing: BufferSource,
     pub buffer: WlBuffer,
     pub size: (u32, u32),
+}
+
+impl WaylandGraphicsBackend {
+    pub fn renderer(&mut self) -> &mut GlesRenderer {
+        match &mut self.backing {
+            BufferSource::Dma(buf) => &mut buf.renderer,
+            _ => panic!("Not a dma buffer"),
+        }
+    }
 }
 
 impl WaylandBackend {
@@ -121,17 +131,16 @@ impl WaylandBackend {
         );
 
         Ok(WaylandGraphicsBackend {
-            backing: Arc::new(
-                Shmbuf {
-                    pool,
-                    offset: 0,
-                    width: width as i32,
-                    height: height as i32,
-                    stride: stride as i32,
-                    format,
-                }
-                .into(),
-            ),
+            backing: Shmbuf {
+                pool,
+                offset: 0,
+                width: width as i32,
+                height: height as i32,
+                stride: stride as i32,
+                format,
+            }
+            .into(),
+
             buffer,
             size: (width, height),
         })
@@ -232,35 +241,36 @@ impl WaylandBackend {
             EGLContext::new_with_config(&display, gl_attributes, PixelFormatRequirements::_8_bit())
         })?;
 
-        let surface = WlEglSurface::new(
-            self.main_window.wl_surface().id(),
-            width as i32,
-            height as i32,
-        )?;
+        // let surface = WlEglSurface::new(
+        //     self.main_window.wl_surface().id(),
+        //     width as i32,
+        //     height as i32,
+        // )?;
 
-        let surface = unsafe {
-            EGLSurface::new(
-                &display,
-                context.pixel_format().unwrap(),
-                context.config_id(),
-                WaylandBackendNativeSurface(surface),
-            )
-        }?;
+        // let surface = unsafe {
+        //     EGLSurface::new(
+        //         &display,
+        //         context.pixel_format().unwrap(),
+        //         context.config_id(),
+        //         WaylandBackendNativeSurface(surface),
+        //     )
+        // }?;
 
-        // let renderer = GlesRenderer::new(display, context, surface)?;
+        let renderer = unsafe { GlesRenderer::new(context) }?;
 
         Ok(Some(WaylandGraphicsBackend {
-            backing: Arc::new(
-                Dmabuf {
-                    display,
-                    width: width as i32,
-                    height: height as i32,
-                    planes,
-                    format,
-                    modifier: modifier.into(),
-                }
-                .into(),
-            ),
+            backing: Dmabuf {
+                display,
+                // surface,
+                renderer,
+                width: width as i32,
+                height: height as i32,
+                planes,
+                format,
+                modifier: modifier.into(),
+            }
+            .into(),
+
             buffer,
             size: (width, height),
         }))

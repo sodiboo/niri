@@ -205,7 +205,6 @@ impl WaylandBackend {
         gbm: GbmDevice<std::fs::File>,
         feedback: DmabufFeedback,
     ) {
-        info!("Got gbm device from dmabuf feedback");
         let surface = self.create_gbm_buffer(
             gbm,
             feedback,
@@ -216,8 +215,8 @@ impl WaylandBackend {
 
         match surface {
             Ok(Some(buf)) => {
-                info!("got Ok(Some(_))");
                 self.main_window.attach(Some(&buf.buffer), 0, 0);
+                self.main_window.commit();
 
                 self.graphics = Some(buf);
             }
@@ -262,89 +261,89 @@ impl WaylandBackend {
         &mut self,
         f: impl FnOnce(&mut GlesRenderer) -> T,
     ) -> Option<T> {
-        todo!()
-        // Some(f(self.backend.renderer()))
+        self.graphics
+            .as_mut()
+            .map(|graphics| f(graphics.renderer()))
     }
 
     pub fn render(&mut self, niri: &mut Niri, output: &Output) -> RenderResult {
-        // let _span = tracy_client::span!("Wayland::render");
+        let _span = tracy_client::span!("WaylandBackend::render");
 
-        // // Render the elements.
-        // let mut elements = niri.render::<GlesRenderer>(
-        //     self.backend.renderer(),
-        //     output,
-        //     true,
-        //     RenderTarget::Output,
-        // );
+        let Some(renderer) = self.backend.map(|backend| backend.renderer()) else {
+            return RenderResult::Skipped;
+        };
 
-        // // Visualize the damage, if enabled.
-        // if niri.debug_draw_damage {
-        //     let output_state = niri.output_state.get_mut(output).unwrap();
-        //     draw_damage(&mut output_state.debug_damage_tracker, &mut elements);
-        // }
+        // Render the elements.
+        let mut elements =
+            niri.render::<GlesRenderer>(renderer, output, true, RenderTarget::Output);
 
-        // // Hand them over to winit.
-        // self.backend.bind().unwrap();
-        // let age = self.backend.buffer_age().unwrap();
-        // let res = self
-        //     .damage_tracker
-        //     .render_output(self.backend.renderer(), age, &elements, [0.; 4])
-        //     .unwrap();
+        // TODO: stuff from this point on lol
 
-        // niri.update_primary_scanout_output(output, &res.states);
+        // Visualize the damage, if enabled.
+        if niri.debug_draw_damage {
+            let output_state = niri.output_state.get_mut(output).unwrap();
+            draw_damage(&mut output_state.debug_damage_tracker, &mut elements);
+        }
 
-        // let rv;
-        // if let Some(damage) = res.damage {
-        //     if self
-        //         .config
-        //         .borrow()
-        //         .debug
-        //         .wait_for_frame_completion_before_queueing
-        //     {
-        //         let _span = tracy_client::span!("wait for completion");
-        //         if let Err(err) = res.sync.wait() {
-        //             warn!("error waiting for frame completion: {err:?}");
-        //         }
-        //     }
+        // Hand them over to winit.
+        self.backend.bind().unwrap();
+        let age = self.backend.buffer_age().unwrap();
+        let res = self
+            .damage_tracker
+            .render_output(renderer, age, &elements, [0.; 4])
+            .unwrap();
 
-        //     self.backend.submit(Some(damage)).unwrap();
+        niri.update_primary_scanout_output(output, &res.states);
 
-        //     let mut presentation_feedbacks = niri.take_presentation_feedbacks(output,
-        // &res.states);     let mode = output.current_mode().unwrap();
-        //     let refresh = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
-        //     presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
-        //         get_monotonic_time(),
-        //         refresh,
-        //         0,
-        //         wp_presentation_feedback::Kind::empty(),
-        //     );
+        let rv;
+        if let Some(damage) = res.damage {
+            if self
+                .config
+                .borrow()
+                .debug
+                .wait_for_frame_completion_before_queueing
+            {
+                let _span = tracy_client::span!("wait for completion");
+                if let Err(err) = res.sync.wait() {
+                    warn!("error waiting for frame completion: {err:?}");
+                }
+            }
 
-        //     rv = RenderResult::Submitted;
-        // } else {
-        //     rv = RenderResult::NoDamage;
-        // }
+            self.backend.submit(Some(damage)).unwrap();
 
-        // let output_state = niri.output_state.get_mut(output).unwrap();
-        // match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
-        //     RedrawState::Idle => unreachable!(),
-        //     RedrawState::Queued => (),
-        //     RedrawState::WaitingForVBlank { .. } => unreachable!(),
-        //     RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
-        //     RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
-        // }
+            let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
+            let mode = output.current_mode().unwrap();
+            let refresh = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
+            presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
+                get_monotonic_time(),
+                refresh,
+                0,
+                wp_presentation_feedback::Kind::empty(),
+            );
 
-        // output_state.frame_callback_sequence =
-        // output_state.frame_callback_sequence.wrapping_add(1);
+            rv = RenderResult::Submitted;
+        } else {
+            rv = RenderResult::NoDamage;
+        }
 
-        // // FIXME: this should wait until a frame callback from the host compositor, but it
-        // redraws // right away instead.
-        // if output_state.unfinished_animations_remain {
-        //     self.backend.window().request_redraw();
-        // }
+        let output_state = niri.output_state.get_mut(output).unwrap();
+        match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
+            RedrawState::Idle => unreachable!(),
+            RedrawState::Queued => (),
+            RedrawState::WaitingForVBlank { .. } => unreachable!(),
+            RedrawState::WaitingForEstimatedVBlank(_) => unreachable!(),
+            RedrawState::WaitingForEstimatedVBlankAndQueued(_) => unreachable!(),
+        }
 
-        // rv
+        output_state.frame_callback_sequence = output_state.frame_callback_sequence.wrapping_add(1);
 
-        todo!()
+        // FIXME: this should wait until a frame callback from the host compositor, but it redraws
+        // right away instead.
+        if output_state.unfinished_animations_remain {
+            self.backend.window().request_redraw();
+        }
+
+        rv
     }
 
     pub fn toggle_debug_tint(&mut self) {
@@ -353,14 +352,14 @@ impl WaylandBackend {
     }
 
     pub fn import_dmabuf(&mut self, dmabuf: &Dmabuf) -> bool {
-        // match self.backend.renderer().import_dmabuf(dmabuf, None) {
-        //     Ok(_texture) => true,
-        //     Err(err) => {
-        //         debug!("error importing dmabuf: {err:?}");
-        //         false
-        //     }
-        // }
-        todo!()
+        self.with_primary_renderer(|renderer| match renderer.import_dmabuf(dmabuf, None) {
+            Ok(_texture) => true,
+            Err(err) => {
+                debug!("error importing dmabuf: {err:?}");
+                false
+            }
+        })
+        .unwrap_or(false)
     }
 
     pub fn ipc_outputs(&self) -> Arc<Mutex<IpcOutputMap>> {
