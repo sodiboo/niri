@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,12 +17,13 @@ use smithay::backend::allocator::{Fourcc, Modifier};
 use smithay::backend::drm::DrmNode;
 use smithay::backend::egl::context::{GlAttributes, PixelFormatRequirements};
 use smithay::backend::egl::display::EGLDisplayHandle;
-use smithay::backend::egl::native::EGLNativeSurface;
-use smithay::backend::egl::{ffi, wrap_egl_call_ptr, EGLContext, EGLDevice, EGLDisplay, EGLError, EGLSurface};
+use smithay::backend::egl::native::{EGLNativeDisplay, EGLNativeSurface};
+use smithay::backend::egl::{ffi, wrap_egl_call_bool, wrap_egl_call_ptr, EGLContext, EGLDevice, EGLDisplay, EGLError, EGLSurface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
+use smithay::egl_platform;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{Physical, Size};
@@ -31,6 +33,7 @@ use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_buffer::{self, WlBuffer};
+use smithay_client_toolkit::reexports::client::protocol::wl_display::WlDisplay;
 use smithay_client_toolkit::reexports::client::protocol::wl_shm;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{delegate_dispatch, delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
@@ -95,13 +98,13 @@ impl From<Dmabuf> for BufferSource {
     }
 }
 
-pub struct WaylandGraphicsBackend {
+pub struct Buffer {
     pub backing: BufferSource,
     pub buffer: WlBuffer,
     pub size: (u32, u32),
 }
 
-impl WaylandGraphicsBackend {
+impl Buffer {
     pub fn renderer(&mut self) -> &mut GlesRenderer {
         match &mut self.backing {
             BufferSource::Dma(buf) => &mut buf.renderer,
@@ -117,7 +120,7 @@ impl WaylandBackend {
         width: u32,
         height: u32,
         stride: u32,
-    ) -> anyhow::Result<WaylandGraphicsBackend> {
+    ) -> anyhow::Result<Buffer> {
         let mut pool = RawPool::new((stride * height) as usize, &self.shm_state)?;
 
         let buffer = pool.create_buffer(
@@ -130,7 +133,7 @@ impl WaylandBackend {
             &self.qh,
         );
 
-        Ok(WaylandGraphicsBackend {
+        Ok(Buffer {
             backing: Shmbuf {
                 pool,
                 offset: 0,
@@ -154,7 +157,7 @@ impl WaylandBackend {
         // modifiers: &[u64],
         (width, height): (u32, u32),
         needs_linear: bool,
-    ) -> anyhow::Result<Option<WaylandGraphicsBackend>> {
+    ) -> anyhow::Result<Option<Buffer>> {
         let formats = feedback.format_table();
 
         let modifiers = feedback
@@ -251,20 +254,20 @@ impl WaylandBackend {
 
         debug!("b");
 
-        let surface = unsafe {
-            EGLSurface::new(
-                &display,
-                context.pixel_format().unwrap(),
-                context.config_id(),
-                WaylandBackendNativeSurface(surface),
-            )
-        }?;
+        // let surface = unsafe {
+        //     EGLSurface::new(
+        //         &display,
+        //         context.pixel_format().unwrap(),
+        //         context.config_id(),
+        //         WaylandBackendNativeSurface(surface),
+        //     )
+        // }?;
 
         debug!("c");
 
         let renderer = unsafe { GlesRenderer::new(context) }?;
 
-        Ok(Some(WaylandGraphicsBackend {
+        Ok(Some(Buffer {
             backing: Dmabuf {
                 display,
                 // surface,
@@ -356,40 +359,3 @@ impl DmabufHandler for WaylandBackend {
 }
 
 smithay_client_toolkit::delegate_dmabuf!(WaylandBackend);
-
-// WlEglSurface impl is used by the winit backend
-// We don't want to depend on winit backend indirectly.
-struct WaylandBackendNativeSurface(WlEglSurface);
-
-unsafe impl EGLNativeSurface for WaylandBackendNativeSurface {
-    unsafe fn create(
-        &self,
-        display: &Arc<EGLDisplayHandle>,
-        config_id: ffi::egl::types::EGLConfig,
-    ) -> Result<*const std::ffi::c_void, EGLError> {
-        const SURFACE_ATTRIBUTES: [std::ffi::c_int; 3] = [
-            ffi::egl::RENDER_BUFFER as std::ffi::c_int,
-            ffi::egl::BACK_BUFFER as std::ffi::c_int,
-            ffi::egl::NONE as std::ffi::c_int,
-        ];
-
-        wrap_egl_call_ptr(|| unsafe {
-            debug!("Creating EGL surface");
-            ffi::egl::CreatePlatformWindowSurfaceEXT(
-                display.handle,
-                config_id,
-                self.0.ptr() as *mut _,
-                SURFACE_ATTRIBUTES.as_ptr(),
-            )
-        })
-    }
-
-    fn resize(&self, width: i32, height: i32, dx: i32, dy: i32) -> bool {
-        WlEglSurface::resize(&self.0, width, height, dx, dy);
-        true
-    }
-
-    fn identifier(&self) -> Option<String> {
-        Some("niri/nested".into())
-    }
-}

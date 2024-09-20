@@ -113,27 +113,24 @@ impl WindowHandler for WaylandBackend {
         configure: smithay_client_toolkit::shell::xdg::window::WindowConfigure,
         serial: u32,
     ) {
-        if window != &self.main_window {
-            error!("Received a configure request for an unknown window.");
-            return;
-        }
         let width = configure
             .new_size
             .0
             .map(u32::from)
             .map(|x| x as i32)
-            .unwrap_or(self.output_size.w);
+            .unwrap_or(self.graphics.window_size().w);
         let height = configure
             .new_size
             .1
             .map(u32::from)
             .map(|x| x as i32)
-            .unwrap_or(self.output_size.h);
+            .unwrap_or(self.graphics.window_size().h);
 
         let new_size = Size::<_, Physical>::from((width, height));
 
-        if new_size != self.output_size {
-            self.events.send(WaylandBackendEvent::Resized(new_size));
+        if new_size != self.graphics.window_size() {
+            self.graphics.set_window_size(new_size);
+            self.events.send(WaylandBackendEvent::Resized);
         }
 
         // let dmabuf = Dmabuf::builder((600, 800));
