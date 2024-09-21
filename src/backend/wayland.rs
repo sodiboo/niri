@@ -35,6 +35,7 @@ use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, EventQueue, QueueHandle};
 use smithay_client_toolkit::reexports::csd_frame::WindowState;
 use smithay_client_toolkit::registry::RegistryState;
+use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::shell::xdg::window::{Window, WindowDecorations};
 use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -57,8 +58,9 @@ pub struct WaylandBackend {
     qh: QueueHandle<Self>,
 
     registry_state: RegistryState,
-    shm_state: Shm,
+    seat_state: SeatState,
     output_state: OutputState,
+    shm_state: Shm,
     compositor_state: CompositorState,
     xdg_state: XdgShell,
     // dmabuf_state: DmabufState,
@@ -73,9 +75,9 @@ pub struct WaylandBackend {
 }
 
 pub enum WaylandBackendEvent {
-    CloseRequest,
+    Close,
     Redraw,
-    Resized,
+    Resize,
 }
 
 impl WaylandBackend {
@@ -108,11 +110,11 @@ impl WaylandBackend {
                 let niri = &mut state.niri;
                 let backend = state.backend.wayland();
                 match event {
-                    WaylandBackendEvent::CloseRequest => niri.stop_signal.stop(),
+                    WaylandBackendEvent::Close => niri.stop_signal.stop(),
                     WaylandBackendEvent::Redraw => niri.queue_redraw(&backend.output),
-                    WaylandBackendEvent::Resized => {
+                    WaylandBackendEvent::Resize => {
                         let size = backend.graphics.window_size();
-                        info!("Resizing window to {size:?}");
+                        info!("Resizing window to {}x{}", size.w, size.h);
                         backend.output.change_current_state(
                             Some(Mode {
                                 size,
@@ -143,8 +145,9 @@ impl WaylandBackend {
             .unwrap();
 
         let registry_state = RegistryState::new(&globals);
-        let shm_state = Shm::bind(&globals, &qh)?;
+        let seat_state = SeatState::new(&globals, &qh);
         let output_state = OutputState::new(&globals, &qh);
+        let shm_state = Shm::bind(&globals, &qh)?;
         let compositor_state = CompositorState::bind(&globals, &qh)?;
         let xdg_state = XdgShell::bind(&globals, &qh)?;
         // let dmabuf_state = DmabufState::new(&globals, &qh);
@@ -202,7 +205,7 @@ impl WaylandBackend {
         let main_window =
             xdg_state.create_window(output_surface, WindowDecorations::ServerDefault, &qh);
 
-        main_window.commit();
+        main_window.commit(); // Initial commit to make the window appear and cause a configure event
 
         let graphics = WaylandGraphicsBackend::new(main_window, (1, 1).into(), &qh)?;
 
@@ -213,8 +216,9 @@ impl WaylandBackend {
             qh,
 
             registry_state,
-            shm_state,
+            seat_state,
             output_state,
+            shm_state,
             compositor_state,
             xdg_state,
             // dmabuf_state,
@@ -227,56 +231,6 @@ impl WaylandBackend {
             graphics,
         })
     }
-
-    fn reconfigured_output(&mut self) {
-        self.output.change_current_state(
-            Some(Mode {
-                size: self.graphics.window_size(),
-                refresh: 60_000,
-            }),
-            None,
-            None,
-            None,
-        );
-    }
-
-    // fn got_gbm_device(
-    //     &mut self,
-    //     path: PathBuf,
-    //     gbm: GbmDevice<std::fs::File>,
-    //     feedback: DmabufFeedback,
-    // ) {
-    //     // for format in feedback.format_table() {
-    //     //     debug!(
-    //     //         "{:?} -> {:?}",
-    //     //         Fourcc::try_from(format.format).ok(),
-    //     //         Modifier::try_from(format.modifier).ok()
-    //     //     );
-    //     // }
-    //     let surface = self.create_gbm_buffer(
-    //         gbm,
-    //         feedback,
-    //         Fourcc::Abgr8888,
-    //         (self.output_size.w as u32, self.output_size.h as u32),
-    //         false,
-    //     );
-
-    //     match surface {
-    //         Ok(Some(buf)) => {
-    //             self.main_window.attach(Some(&buf.buffer), 0, 0);
-    //             self.main_window.commit();
-
-    //             self.graphics = Some(buf);
-
-    //             debug!("init");
-    //             self.events.send(WaylandBackendEvent::Init).unwrap();
-    //         }
-    //         Ok(None) => info!("got Ok(None)"),
-    //         Err(err) => error!("err: {err:?}"),
-    //     }
-    // }
-
-    // fn failed_gbm_device(&mut self, feedback: DmabufFeedback) {}
 
     pub fn init(&mut self, niri: &mut Niri) {
         let renderer = self.graphics.renderer();

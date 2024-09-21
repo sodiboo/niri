@@ -118,12 +118,7 @@ impl WaylandGraphicsBackend {
         .or_else(|_| {
             EGLContext::new_with_config(&display, gl_attributes, PixelFormatRequirements::_8_bit())
         })?;
-
-        debug!("a");
-
         let surface = WlEglSurface::new(window.wl_surface().id(), 1, 1)?;
-
-        debug!("b");
 
         let surface = unsafe {
             EGLSurface::new(
@@ -133,8 +128,6 @@ impl WaylandGraphicsBackend {
                 WaylandBackendNativeSurface(surface),
             )
         }?;
-
-        debug!("c");
 
         let renderer = unsafe { GlesRenderer::new(context) }?;
 
@@ -274,26 +267,7 @@ unsafe impl EGLNativeSurface for WaylandBackendNativeSurface {
             ffi::egl::NONE as std::ffi::c_int,
         ];
 
-        let mut value: std::ffi::c_int = 0;
-
-        if wrap_egl_call_bool(|| unsafe {
-            ffi::egl::GetConfigAttrib(
-                display.handle,
-                config_id,
-                ffi::egl::SURFACE_TYPE as i32,
-                &mut value,
-            )
-        })
-        .unwrap()
-            != 0
-        {
-            debug!("Window bit: {}", value as u32 & ffi::egl::WINDOW_BIT != 0);
-            debug!("PBuffer bit: {}", value as u32 & ffi::egl::PBUFFER_BIT != 0);
-            debug!("Pixmap bit: {}", value as u32 & ffi::egl::PIXMAP_BIT != 0);
-        }
-
         wrap_egl_call_ptr(|| unsafe {
-            debug!("Creating EGL surface");
             ffi::egl::CreatePlatformWindowSurfaceEXT(
                 display.handle,
                 config_id,

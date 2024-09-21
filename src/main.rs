@@ -7,6 +7,7 @@ use std::io::{self, Write};
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 use std::{env, mem};
 
 use clap::Parser;
@@ -254,6 +255,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop
         .run(None, &mut state, |state| state.refresh_and_flush_clients())
         .unwrap();
+
+    std::mem::forget(event_loop.handle());
 
     Ok(())
 }
