@@ -1,45 +1,35 @@
-#![allow(unused_imports, unused_variables)]
+// #![allow(unused_imports, unused_variables)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::mem;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::{mem, path};
 
 use calloop::channel::Sender;
-use graphics::WaylandGraphicsBackend;
 use niri_config::{Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
-use smithay::backend::allocator::gbm::GbmDevice;
-use smithay::backend::allocator::{Fourcc, Modifier};
-use smithay::backend::egl::{EGLDevice, EGLDisplay};
+use smithay::backend::input::InputEvent;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
-use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
-use smithay::reexports::gbm::Format;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
-use smithay::utils::{Physical, Size};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
-use smithay_client_toolkit::dmabuf::{DmabufFeedback, DmabufState};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::protocol::wl_shm;
-use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
-use smithay_client_toolkit::reexports::client::{Connection, EventQueue, QueueHandle};
-use smithay_client_toolkit::reexports::csd_frame::WindowState;
+use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
+use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
+use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use smithay_client_toolkit::registry::RegistryState;
+use smithay_client_toolkit::seat::relative_pointer::RelativePointerState;
 use smithay_client_toolkit::seat::SeatState;
-use smithay_client_toolkit::shell::xdg::window::{Window, WindowDecorations};
+use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
 use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shm::Shm;
 
 use super::{IpcOutputMap, OutputId, RenderResult};
 use crate::niri::{Niri, RedrawState, State};
@@ -47,10 +37,15 @@ use crate::render_helpers::debug::draw_damage;
 use crate::render_helpers::{resources, shaders, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
-// mod buffer;
 mod graphics;
 mod handlers;
+mod input;
+mod seat;
 
+use graphics::WaylandGraphicsBackend;
+pub use input::{WaylandInputBackend, WaylandInputSpecialEvent};
+
+#[allow(dead_code)]
 pub struct WaylandBackend {
     config: Rc<RefCell<Config>>,
     events: Sender<WaylandBackendEvent>,
@@ -59,24 +54,24 @@ pub struct WaylandBackend {
 
     registry_state: RegistryState,
     seat_state: SeatState,
+    relative_pointer_state: RelativePointerState,
     output_state: OutputState,
-    shm_state: Shm,
     compositor_state: CompositorState,
     xdg_state: XdgShell,
-    // dmabuf_state: DmabufState,
+
     output: Output,
-    // graphics: WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: OutputDamageTracker,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
-    dmabuf_feedback: Option<DmabufFeedback>,
-
     graphics: WaylandGraphicsBackend,
+
+    seats: HashMap<WlSeat, self::seat::SeatDevices>,
 }
 
 pub enum WaylandBackendEvent {
+    Input(InputEvent<WaylandInputBackend>),
+    Frame,
     Close,
-    Redraw,
     Resize,
 }
 
@@ -110,11 +105,12 @@ impl WaylandBackend {
                 let niri = &mut state.niri;
                 let backend = state.backend.wayland();
                 match event {
+                    WaylandBackendEvent::Input(event) => state.process_input_event(event),
+                    WaylandBackendEvent::Frame => niri.queue_redraw(&backend.output),
                     WaylandBackendEvent::Close => niri.stop_signal.stop(),
-                    WaylandBackendEvent::Redraw => niri.queue_redraw(&backend.output),
                     WaylandBackendEvent::Resize => {
                         let size = backend.graphics.window_size();
-                        info!("Resizing window to {}x{}", size.w, size.h);
+                        debug!("Resizing window to {}x{}", size.w, size.h);
                         backend.output.change_current_state(
                             Some(Mode {
                                 size,
@@ -146,11 +142,10 @@ impl WaylandBackend {
 
         let registry_state = RegistryState::new(&globals);
         let seat_state = SeatState::new(&globals, &qh);
+        let relative_pointer_state = RelativePointerState::bind(&globals, &qh);
         let output_state = OutputState::new(&globals, &qh);
-        let shm_state = Shm::bind(&globals, &qh)?;
         let compositor_state = CompositorState::bind(&globals, &qh)?;
         let xdg_state = XdgShell::bind(&globals, &qh)?;
-        // let dmabuf_state = DmabufState::new(&globals, &qh);
 
         let output = Output::new(
             "nested niri".to_string(),
@@ -205,9 +200,24 @@ impl WaylandBackend {
         let main_window =
             xdg_state.create_window(output_surface, WindowDecorations::ServerDefault, &qh);
 
-        main_window.commit(); // Initial commit to make the window appear and cause a configure event
+        // This transform is necessary to make the window appear right-side up.
+        // It will never change throughout the lifetime of the window.
+        main_window
+            .set_buffer_transform(Transform::Flipped180)
+            .unwrap();
+
+        main_window.set_app_id("niri");
+        main_window.set_title("niri");
+
+        // We initialize everything as 1x1, and pray the compositor chooses a better size
+        // upon the first configure event. This commit is necessary to receive that event.
+        main_window.commit();
 
         let graphics = WaylandGraphicsBackend::new(main_window, (1, 1).into(), &qh)?;
+
+        // seat_state.seats().for_each(|seat| {
+        //     info!("New seat: {:?}", seat);
+        // });
 
         Ok(Self {
             config,
@@ -217,22 +227,35 @@ impl WaylandBackend {
 
             registry_state,
             seat_state,
+            relative_pointer_state,
             output_state,
-            shm_state,
             compositor_state,
             xdg_state,
-            // dmabuf_state,
+
             output,
             damage_tracker,
             ipc_outputs,
 
-            dmabuf_feedback: None,
-
             graphics,
+
+            seats: HashMap::new(),
         })
     }
 
+    pub fn send_event(&self, event: WaylandBackendEvent) {
+        self.events
+            .send(event)
+            .expect("WaylandBackend event channel closed");
+    }
+
+    pub fn send_input_event(&self, event: InputEvent<WaylandInputBackend>) {
+        self.send_event(WaylandBackendEvent::Input(event));
+    }
+
     pub fn init(&mut self, niri: &mut Niri) {
+        // This is set to true upon wl_keyboard::enter.
+        niri.compositor_has_keyboard_focus = false;
+
         let renderer = self.graphics.renderer();
         if let Err(err) = renderer.bind_wl_display(&niri.display_handle) {
             warn!("error binding renderer wl_display: {err}");
@@ -259,7 +282,7 @@ impl WaylandBackend {
     }
 
     pub fn seat_name(&self) -> String {
-        "winit".to_owned()
+        "niri-nested".to_owned()
     }
 
     pub fn with_primary_renderer<T>(
@@ -341,7 +364,7 @@ impl WaylandBackend {
         // FIXME: this should wait until a frame callback from the host compositor, but it redraws
         // right away instead.
         if output_state.unfinished_animations_remain {
-            self.events.send(WaylandBackendEvent::Redraw).unwrap();
+            self.graphics.request_frame_callback();
         }
 
         rv

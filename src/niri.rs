@@ -277,6 +277,12 @@ pub struct Niri {
     pub horizontal_finger_scroll_tracker: ScrollTracker,
     pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
 
+    /// When set to false, no client should get keyboard focus.
+    /// This is used in the wayland backend to properly map keyboard enter and leave events,
+    /// but it could in theory be used for e.g. when no keyboard is connected.
+    /// We don't currently handle that case, though.
+    pub compositor_has_keyboard_focus: bool,
+
     pub lock_state: LockState,
 
     pub screenshot_ui: ScreenshotUi,
@@ -1876,6 +1882,8 @@ impl Niri {
             vertical_finger_scroll_tracker: ScrollTracker::new(10),
             horizontal_finger_scroll_tracker: ScrollTracker::new(10),
             mods_with_finger_scroll_binds,
+
+            compositor_has_keyboard_focus: true,
 
             lock_state: LockState::Unlocked,
 

@@ -7,7 +7,6 @@ use std::io::{self, Write};
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
 use std::{env, mem};
 
 use clap::Parser;
