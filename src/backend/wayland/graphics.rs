@@ -156,15 +156,7 @@ impl WaylandGraphicsBackend {
                 let bind_size = self
                     .bind_size
                     .expect("submitting without ever binding the renderer.");
-                let damage = damage
-                    .iter()
-                    .map(|rect| {
-                        Rectangle::from_loc_and_size(
-                            (rect.loc.x, bind_size.h - rect.loc.y - rect.size.h),
-                            rect.size,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let damage = damage.to_vec();
                 Some(damage)
             }
             _ => None,
@@ -172,16 +164,6 @@ impl WaylandGraphicsBackend {
 
         // Request frame callback.
         self.request_frame_callback();
-
-        // wayland-egl doesn't properly damage the buffer, so we need to do it manually.
-        for damage in damage.iter().flatten() {
-            self.window.wl_surface().damage_buffer(
-                damage.loc.x,
-                damage.loc.y,
-                damage.size.w,
-                damage.size.h,
-            );
-        }
         self.surface.swap_buffers(damage.as_deref_mut())?;
         Ok(())
     }
