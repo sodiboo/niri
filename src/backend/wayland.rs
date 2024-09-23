@@ -22,11 +22,9 @@ use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
-use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
 use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::relative_pointer::RelativePointerState;
-use smithay_client_toolkit::seat::SeatState;
 use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
 use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -40,10 +38,11 @@ use crate::utils::{get_monotonic_time, logical_output};
 mod graphics;
 mod handlers;
 mod input;
-mod seat;
+pub mod seat;
 
 use graphics::WaylandGraphicsBackend;
 pub use input::{WaylandInputBackend, WaylandInputSpecialEvent};
+use seat::SeatState;
 
 #[allow(dead_code)]
 pub struct WaylandBackend {
@@ -64,8 +63,6 @@ pub struct WaylandBackend {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
     graphics: WaylandGraphicsBackend,
-
-    seats: HashMap<WlSeat, self::seat::SeatDevices>,
 }
 
 pub enum WaylandBackendEvent {
@@ -237,8 +234,6 @@ impl WaylandBackend {
             ipc_outputs,
 
             graphics,
-
-            seats: HashMap::new(),
         })
     }
 
@@ -309,7 +304,7 @@ impl WaylandBackend {
             draw_damage(&mut output_state.debug_damage_tracker, &mut elements);
         }
 
-        // Hand them over to winit.
+        // Hand it all over to the graphics backend.
         self.graphics.bind().unwrap();
         let age = self.graphics.buffer_age().unwrap();
         let res = self

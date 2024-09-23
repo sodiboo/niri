@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::fd::OwnedFd;
 
 use smithay::backend::input::{
     Axis, AxisRelativeDirection, AxisSource, ButtonState, Device, DeviceCapability, InputBackend,
@@ -9,7 +10,6 @@ use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard
 use smithay_client_toolkit::reexports::client::protocol::wl_pointer::WlPointer;
 use smithay_client_toolkit::reexports::client::protocol::wl_touch::WlTouch;
 use smithay_client_toolkit::seat;
-use smithay_client_toolkit::seat::keyboard::Modifiers;
 
 #[derive(Debug)]
 pub struct WaylandInputBackend;
@@ -74,28 +74,31 @@ impl Device for WaylandInputDevice {
 }
 
 macro_rules! event {
-    (pub struct $event:ident {
-        pub $device:ident: $device_ty:ty,
-        pub time: u32,
-        $(#[TouchEvent] {
-                pub $touch_slot:ident: TouchSlot,
-        })?
-        $(#[AbsolutePositionEvent] {
-            pub $x:ident: f64,
-            pub $y:ident: f64,
-            pub $window_size:ident: Size<i32, Physical>,
-        })?
-        $(pub $field:ident: $field_ty:ty,)*
-    }
+    (
+        pub struct $event:ident {
+            pub $device:ident: $device_ty:ty,
+            $(pub $field:ident: $field_ty:ty,)*
+            $(#[TouchEvent] {
+                    pub $touch_slot:ident: TouchSlot,
+            })?
+            $(#[AbsolutePositionEvent] {
+                pub $x:ident: f64,
+                pub $y:ident: f64,
+                pub $window_size:ident: Size<i32, Physical>,
+            })?
+            $(
+                fn time($($param:tt)*) -> $ret:ty $time:block
+            )?
+        }
 
-    $(impl $trait:ident {
-        $($impl:tt)*
-    })*
-) => {
+        $(impl $trait:ident {
+            $($impl:tt)*
+        })*
+    ) => {
         #[derive(Debug)]
         pub struct $event {
             pub $device: $device_ty,
-            pub time: u32,
+            $(pub $field: $field_ty,)*
             $(
                 pub $touch_slot: TouchSlot,
             )?
@@ -104,12 +107,24 @@ macro_rules! event {
                 pub $y: f64,
                 pub $window_size: Size<i32, Physical>,
             )?
-            $(pub $field: $field_ty,)*
         }
+
+        $(
+            impl $event {
+                fn __time($($param)*) -> $ret $time
+            }
+        )?
 
         impl ::smithay::backend::input::Event<WaylandInputBackend> for $event {
             fn time(&self) -> u64 {
-                self.time as u64 * 1000 // millis to micros
+                $(
+                    let v: $ret = self.__time();
+                    return v;
+                    #[cfg(any())]
+                )?
+                {
+                    self.time as u64 * 1000 // millis to micros
+                }
             }
 
             fn device(&self) -> WaylandInputDevice {
@@ -126,8 +141,8 @@ macro_rules! event {
         )?
 
         $(
-            impl ::smithay::backend::input::AbsolutePositionEvent<WaylandInputBackend> for $event {
-                fn x(&self) -> f64 {
+            impl ::smithay::backend::input::AbsolutePositionEvent<WaylandInputBackend> for $event
+{                 fn x(&self) -> f64 {
                     self.$x
                 }
 
@@ -180,42 +195,34 @@ event!(
     }
 );
 
-// This one doesn't use the above macro because relative_pointer gives us microsecond timestamps.
-#[derive(Debug)]
-pub struct WaylandPointerRelativeMotionEvent {
-    pub pointer: WlPointer,
-    pub relative_motion: seat::relative_pointer::RelativeMotionEvent,
-}
-
-impl smithay::backend::input::Event<WaylandInputBackend> for WaylandPointerRelativeMotionEvent {
-    fn time(&self) -> u64 {
-        self.relative_motion.utime // this one is already in micros! :3
+event!(
+    pub struct WaylandPointerRelativeMotionEvent {
+        pub pointer: WlPointer,
+        pub relative_motion: seat::relative_pointer::RelativeMotionEvent,
+        fn time(&self) -> u64 {
+            self.relative_motion.utime // this one is already in micros! :3
+        }
     }
 
-    fn device(&self) -> WaylandInputDevice {
-        self.pointer.clone().into()
-    }
-}
+    impl PointerMotionEvent
+    {
+        fn delta_x(&self) -> f64 {
+            self.relative_motion.delta.0
+        }
 
-impl smithay::backend::input::PointerMotionEvent<WaylandInputBackend>
-    for WaylandPointerRelativeMotionEvent
-{
-    fn delta_x(&self) -> f64 {
-        self.relative_motion.delta.0
-    }
+        fn delta_y(&self) -> f64 {
+            self.relative_motion.delta.1
+        }
 
-    fn delta_y(&self) -> f64 {
-        self.relative_motion.delta.1
-    }
+        fn delta_x_unaccel(&self) -> f64 {
+            self.relative_motion.delta_unaccel.0
+        }
 
-    fn delta_x_unaccel(&self) -> f64 {
-        self.relative_motion.delta_unaccel.0
+        fn delta_y_unaccel(&self) -> f64 {
+            self.relative_motion.delta_unaccel.1
+        }
     }
-
-    fn delta_y_unaccel(&self) -> f64 {
-        self.relative_motion.delta_unaccel.1
-    }
-}
+);
 
 event!(
     pub struct WaylandPointerMotionEvent {
@@ -249,47 +256,23 @@ event!(
     }
 );
 
-event!(
-    pub struct WaylandPointerAxisEvent {
-        pub pointer: WlPointer,
-        pub time: u32,
-        pub horizontal: seat::pointer::AxisScroll,
-        pub vertical: seat::pointer::AxisScroll,
-        pub source: Option<AxisSource>,
-    }
+#[derive(Debug, PartialEq, Clone)]
+pub struct AxisFrame {
+    pub time: u32,
+    pub horizontal: AxisScroll,
+    pub vertical: AxisScroll,
+    pub source: AxisSource,
+}
 
-    impl PointerAxisEvent {
-        fn amount(&self, axis: Axis) -> Option<f64> {
-            Some(self[axis].absolute)
-        }
+#[derive(Debug, PartialEq, Clone)]
+pub struct AxisScroll {
+    pub absolute: f64,
+    pub v120: i32,
+    pub relative_direction: AxisRelativeDirection,
+}
 
-        fn amount_v120(&self, axis: Axis) -> Option<f64> {
-            Some(self[axis].discrete as f64)
-        }
-
-        fn source(&self) -> AxisSource {
-            // Wayland doesn't guarantee the source is known, but smithay::backend::input requires it.
-            // We don't have much of a choice but to lie.
-            self.source.unwrap_or_else(|| {
-                warn!("unknown AxisSource for wl_pointer frame, lying and saying it's Wheel");
-                // I assume most compositors always send an axis source, we certainly do in niri.
-                // So while the axis_source event is optional, we "should" always have it,
-                // unless the compositor doesn't support that version of the protocol at all.
-                // In that case, I think it's most likely to be a Wheel event. Such a compositor
-                // is probably unlikely to know what a finger or a continuous event even is.
-                AxisSource::Wheel
-            })
-        }
-
-        fn relative_direction(&self, axis: Axis) -> AxisRelativeDirection {
-            let _ = axis;
-            // SCTK doesn't support wl_pointer v9 yet, so we can't get the relative direction :(
-            AxisRelativeDirection::Identical
-        }
-    }
-);
-impl std::ops::Index<Axis> for WaylandPointerAxisEvent {
-    type Output = seat::pointer::AxisScroll;
+impl std::ops::Index<Axis> for AxisFrame {
+    type Output = AxisScroll;
 
     fn index(&self, axis: Axis) -> &Self::Output {
         match axis {
@@ -299,10 +282,80 @@ impl std::ops::Index<Axis> for WaylandPointerAxisEvent {
     }
 }
 
+impl std::ops::IndexMut<Axis> for AxisFrame {
+    fn index_mut(&mut self, axis: Axis) -> &mut Self::Output {
+        match axis {
+            Axis::Vertical => &mut self.vertical,
+            Axis::Horizontal => &mut self.horizontal,
+        }
+    }
+}
+
+impl Default for AxisFrame {
+    fn default() -> Self {
+        AxisFrame {
+            time: 0, // Should always be overwritten.
+            horizontal: AxisScroll {
+                absolute: 0.0,
+                v120: 0,
+                relative_direction: AxisRelativeDirection::Identical,
+            },
+            vertical: AxisScroll {
+                absolute: 0.0,
+                v120: 0,
+                relative_direction: AxisRelativeDirection::Identical,
+            },
+            // I assume most compositors always send an axis source (we certainly do in niri).
+            // As such, this "should" always be overwritten. If it isn't, it's probably a bug,
+            // But maybe the compositor doesn't support v5 of the wl_pointer protocol at all.
+            // In that case, we know we won't get any axis_source, and i think for such an old
+            // compositor we're most likely to be dealing with a Wheel.
+            source: AxisSource::Wheel,
+        }
+    }
+}
+
+impl AxisFrame {
+    pub fn time(&mut self, time: u32) {
+        if self.time == 0 {
+            self.time = time;
+        }
+    }
+}
+
+event!(
+    pub struct WaylandPointerAxisEvent {
+        pub pointer: WlPointer,
+        pub axis_frame: AxisFrame,
+        fn time(&self) -> u64 {
+            self.axis_frame.time as u64 * 1000 // millis to micros
+        }
+    }
+
+    impl PointerAxisEvent {
+        fn amount(&self, axis: Axis) -> Option<f64> {
+            Some(self.axis_frame[axis].absolute)
+        }
+
+        fn amount_v120(&self, axis: Axis) -> Option<f64> {
+            Some(self.axis_frame[axis].v120 as f64)
+        }
+
+        fn source(&self) -> AxisSource {
+            self.axis_frame.source
+        }
+
+        fn relative_direction(&self, axis: Axis) -> AxisRelativeDirection {
+            self.axis_frame[axis].relative_direction
+        }
+    }
+);
+
 event!(
     pub struct WaylandTouchDownEvent {
         pub touch: WlTouch,
         pub time: u32,
+        pub serial: u32,
         #[TouchEvent] {
             pub slot: TouchSlot,
         }
@@ -311,7 +364,6 @@ event!(
             pub y: f64,
             pub window_size: Size<i32, Physical>,
         }
-        pub serial: u32,
     }
     impl TouchDownEvent {}
 );
@@ -320,10 +372,10 @@ event!(
     pub struct WaylandTouchUpEvent {
         pub touch: WlTouch,
         pub time: u32,
+        pub serial: u32,
         #[TouchEvent] {
             pub slot: TouchSlot,
         }
-        pub serial: u32,
     }
     impl TouchUpEvent {}
 );
@@ -363,8 +415,6 @@ event!(
     impl TouchFrameEvent {}
 );
 
-impl smithay::backend::input::TouchFrameEvent<WaylandInputBackend> for WaylandTouchCancelEvent {}
-
 #[derive(Debug)]
 pub enum WaylandInputSpecialEvent {
     PointerEnter {
@@ -384,10 +434,23 @@ pub enum WaylandInputSpecialEvent {
         keyboard: WlKeyboard,
         serial: u32,
     },
+    KeyboardKeymap {
+        keyboard: WlKeyboard,
+        fd: OwnedFd,
+        size: u32,
+    },
     KeyboardModifiers {
         keyboard: WlKeyboard,
         serial: u32,
-        modifiers: Modifiers,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    },
+    KeyboardRepeatInfo {
+        keyboard: WlKeyboard,
+        rate: i32,
+        delay: i32,
     },
 }
 

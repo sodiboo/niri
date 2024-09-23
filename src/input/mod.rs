@@ -110,6 +110,12 @@ impl ProcessSpecialEvent<WaylandInputBackend> for State {
                     let _ = ctx;
                 });
             }
+            WaylandInputSpecialEvent::KeyboardKeymap { .. } => {
+                debug!("Got keymap; ignoring")
+            }
+            WaylandInputSpecialEvent::KeyboardRepeatInfo { rate, delay, .. } => {
+                debug!("Got key repeat info; ignoring (rate={rate}, delay={delay})")
+            }
         }
     }
 }
