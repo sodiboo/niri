@@ -784,7 +784,9 @@ impl State {
         }
 
         // Compute the current focus.
-        let focus = if self.niri.is_locked() {
+        let focus = if !self.niri.compositor_has_keyboard_focus {
+            KeyboardFocus::Layout { surface: None }
+        } else if self.niri.is_locked() {
             KeyboardFocus::LockScreen {
                 surface: self.niri.lock_surface_focus(),
             }
