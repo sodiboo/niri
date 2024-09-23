@@ -172,11 +172,16 @@ impl WaylandGraphicsBackend {
 
         // Request frame callback.
         self.request_frame_callback();
-        // something fucked about the damage tracking so let's just damage everything
-        // TODO: FIX THE DAMAGE TRACKING YOU FUCK
-        self.window
-            .wl_surface()
-            .damage_buffer(0, 0, i32::MAX, i32::MAX);
+
+        // wayland-egl doesn't properly damage the buffer, so we need to do it manually.
+        for damage in damage.iter().flatten() {
+            self.window.wl_surface().damage_buffer(
+                damage.loc.x,
+                damage.loc.y,
+                damage.size.w,
+                damage.size.h,
+            );
+        }
         self.surface.swap_buffers(damage.as_deref_mut())?;
         Ok(())
     }
