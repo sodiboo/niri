@@ -250,6 +250,8 @@ impl WaylandBackend {
     pub fn init(&mut self, niri: &mut Niri) {
         // This is set to true upon wl_keyboard::enter.
         niri.compositor_has_keyboard_focus = false;
+        // This is set to false upon wl_pointer::enter.
+        niri.pointer_hidden = true;
 
         let renderer = self.graphics.renderer();
         if let Err(err) = renderer.bind_wl_display(&niri.display_handle) {
