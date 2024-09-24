@@ -151,21 +151,8 @@ impl WaylandGraphicsBackend {
         &mut self,
         damage: Option<&[Rectangle<i32, Physical>]>,
     ) -> Result<(), smithay::backend::SwapBuffersError> {
-        let mut damage = match damage {
-            Some(damage) if self.damage_tracking && !damage.is_empty() => {
-                let bind_size = self
-                    .bind_size
-                    .expect("submitting without ever binding the renderer.");
-                let damage = damage.to_vec();
-                Some(damage)
-            }
-            _ => None,
-        };
-
-        // Request frame callback.
         self.request_frame_callback();
-        self.surface.swap_buffers(damage.as_deref_mut())?;
-        Ok(())
+        self.surface.swap_buffers(damage.to_owned().as_deref_mut())
     }
 }
 
