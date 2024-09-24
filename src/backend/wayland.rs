@@ -330,7 +330,9 @@ impl WaylandBackend {
                 }
             }
 
-            self.graphics.submit(Some(damage)).unwrap();
+            self.graphics
+                .submit(damage, output.current_transform())
+                .unwrap();
 
             let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
             let mode = output.current_mode().unwrap();

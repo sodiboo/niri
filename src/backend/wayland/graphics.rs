@@ -8,7 +8,7 @@ use smithay::backend::egl::{ffi, wrap_egl_call_ptr, EGLContext, EGLDisplay, EGLE
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Bind;
 use smithay::egl_platform;
-use smithay::utils::{Physical, Rectangle, Size};
+use smithay::utils::{Physical, Rectangle, Size, Transform};
 use smithay_client_toolkit::reexports::client::{Proxy, QueueHandle};
 use smithay_client_toolkit::shell::xdg::window::Window;
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -149,11 +149,24 @@ impl WaylandGraphicsBackend {
     // #[profiling::function]
     pub fn submit(
         &mut self,
-        damage: Option<&[Rectangle<i32, Physical>]>,
+        damage: &[Rectangle<i32, Physical>],
+        transform: Transform,
     ) -> Result<(), smithay::backend::SwapBuffersError> {
+        let bind_size = self
+            .bind_size
+            .expect("submitting without ever binding the renderer.");
+
+        let output_area = transform.transform_size(bind_size);
+
+        let mut damage = damage
+            .iter()
+            .map(|&rect| {
+                transform.invert().transform_rect_in(rect, &output_area)
+            })
+            .collect::<Vec<_>>();
+
         self.request_frame_callback();
-        self.surface
-            .swap_buffers(damage.map(<[_]>::to_vec).as_deref_mut())?;
+        self.surface.swap_buffers(Some(&mut damage))?;
         Ok(())
     }
 }
