@@ -152,7 +152,9 @@ impl WaylandGraphicsBackend {
         damage: Option<&[Rectangle<i32, Physical>]>,
     ) -> Result<(), smithay::backend::SwapBuffersError> {
         self.request_frame_callback();
-        self.surface.swap_buffers(damage.to_owned().as_deref_mut())
+        self.surface
+            .swap_buffers(damage.map(<[_]>::to_vec).as_deref_mut())?;
+        Ok(())
     }
 }
 
