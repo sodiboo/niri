@@ -52,7 +52,7 @@ impl Seat {
     fn lock_pointer(
         &self,
         surface: &WlSurface,
-        backend: &WaylandBackend,
+        backend: &mut WaylandBackend,
         qh: &QueueHandle<WaylandBackend>,
     ) {
         self.data().with_devices_mut(|devices| {
@@ -71,15 +71,19 @@ impl Seat {
                 backend
                     .pointer_constraints_state
                     .lock_pointer(surface, pointer, None, Lifetime::Persistent, qh)
+                    .inspect(|locked_pointer| {
+                        backend.locked_pointers.push(locked_pointer.clone());
+                    })
                     .ok()
             });
         })
     }
 
-    fn unlock_pointer(&self) {
+    fn unlock_pointer(&self, backend: &mut WaylandBackend) {
         self.data().with_devices_mut(|devices| {
             if let Some(locked_pointer) = devices.locked_pointer.take() {
                 locked_pointer.destroy();
+                backend.locked_pointers.retain(|p| p != &locked_pointer);
             }
         })
     }
@@ -137,6 +141,10 @@ impl RegistryHandler<WaylandBackend> for SeatState {
                         backend.send_input_event(InputEvent::DeviceRemoved {
                             device: keyboard.into(),
                         });
+                    }
+                    if let Some(locked_pointer) = devices.locked_pointer.take() {
+                        locked_pointer.destroy();
+                        backend.locked_pointers.retain(|p| p != &locked_pointer);
                     }
                     if let Some(relative_pointer) = devices.relative_pointer.take() {
                         relative_pointer.destroy();
@@ -328,7 +336,7 @@ impl Dispatch<WlKeyboard, Seat> for WaylandBackend {
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardLeave { keyboard, serial },
                 ));
-                seat.unlock_pointer();
+                seat.unlock_pointer(backend);
             }
             wl_keyboard::Event::Key {
                 serial,

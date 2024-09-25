@@ -567,6 +567,8 @@ impl State {
         self.ipc_refresh_layout();
         self.ipc_refresh_keyboard_layout_index();
 
+        self.refresh_cursor_position_hint();
+
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_mapped_cast_outputs();
     }
@@ -1577,6 +1579,14 @@ impl State {
         if let Err(err) = to_introspect.send_blocking(msg) {
             warn!("error sending windows to introspect: {err:?}");
         }
+    }
+
+    pub fn refresh_cursor_position_hint(&mut self) {
+        let _span = tracy_client::span!("State::refresh_pointer_hint");
+
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        self.backend
+            .set_cursor_position_hint(pointer.current_location());
     }
 }
 

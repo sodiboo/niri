@@ -17,12 +17,14 @@ use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
+use smithay::utils::{Logical, Point};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
 use smithay_client_toolkit::reexports::client::Connection;
+use smithay_client_toolkit::reexports::protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1::ZwpLockedPointerV1;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::pointer_constraints::PointerConstraintsState;
 use smithay_client_toolkit::seat::relative_pointer::RelativePointerState;
@@ -57,6 +59,10 @@ pub struct WaylandBackend {
     compositor_state: CompositorState,
     xdg_state: XdgShell,
     pointer_constraints_state: PointerConstraintsState,
+
+    // This field is redundant with the seat state, but it's used to avoid mutex overhead on every
+    // refresh.
+    locked_pointers: Vec<ZwpLockedPointerV1>,
 
     output: Output,
     damage_tracker: OutputDamageTracker,
@@ -225,6 +231,8 @@ impl WaylandBackend {
             xdg_state,
             pointer_constraints_state,
 
+            locked_pointers: Vec::new(),
+
             output,
             damage_tracker,
             ipc_outputs,
@@ -241,6 +249,12 @@ impl WaylandBackend {
 
     pub fn send_input_event(&self, event: InputEvent<WaylandInputBackend>) {
         self.send_event(WaylandBackendEvent::Input(event));
+    }
+
+    pub fn set_cursor_position_hint(&mut self, location: Point<f64, Logical>) {
+        for locked_pointer in &self.locked_pointers {
+            locked_pointer.set_cursor_position_hint(location.x, location.y);
+        }
     }
 
     pub fn init(&mut self, niri: &mut Niri) {

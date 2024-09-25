@@ -6,6 +6,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point};
 
 use crate::input::CompositorMod;
 use crate::niri::Niri;
@@ -191,6 +192,14 @@ impl Backend {
             Backend::Tty(tty) => tty.on_debug_config_changed(),
             Backend::Winit(_) => (),
             Backend::Wayland(_) => (),
+        }
+    }
+
+    pub fn set_cursor_position_hint(&mut self, location: Point<f64, Logical>) {
+        match self {
+            Backend::Tty(_) => (),
+            Backend::Winit(_) => (),
+            Backend::Wayland(wayland) => wayland.set_cursor_position_hint(location),
         }
     }
 
