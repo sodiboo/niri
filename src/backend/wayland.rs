@@ -24,6 +24,7 @@ use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
 use smithay_client_toolkit::reexports::client::Connection;
 use smithay_client_toolkit::registry::RegistryState;
+use smithay_client_toolkit::seat::pointer_constraints::PointerConstraintsState;
 use smithay_client_toolkit::seat::relative_pointer::RelativePointerState;
 use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
 use smithay_client_toolkit::shell::xdg::XdgShell;
@@ -55,6 +56,7 @@ pub struct WaylandBackend {
     output_state: OutputState,
     compositor_state: CompositorState,
     xdg_state: XdgShell,
+    pointer_constraints_state: PointerConstraintsState,
 
     output: Output,
     damage_tracker: OutputDamageTracker,
@@ -141,6 +143,7 @@ impl WaylandBackend {
         let output_state = OutputState::new(&globals, &qh);
         let compositor_state = CompositorState::bind(&globals, &qh)?;
         let xdg_state = XdgShell::bind(&globals, &qh)?;
+        let pointer_constraints_state = PointerConstraintsState::bind(&globals, &qh);
 
         let output = Output::new(
             "nested niri".to_string(),
@@ -210,10 +213,6 @@ impl WaylandBackend {
 
         let graphics = WaylandGraphicsBackend::new(main_window, (1, 1).into(), &qh)?;
 
-        // seat_state.seats().for_each(|seat| {
-        //     info!("New seat: {:?}", seat);
-        // });
-
         Ok(Self {
             config,
             events,
@@ -224,6 +223,7 @@ impl WaylandBackend {
             output_state,
             compositor_state,
             xdg_state,
+            pointer_constraints_state,
 
             output,
             damage_tracker,

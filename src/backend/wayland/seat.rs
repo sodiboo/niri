@@ -1,21 +1,30 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use smithay::backend::input;
 use smithay::backend::input::{ButtonState, InputEvent};
-use smithay::reexports::wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 use smithay_client_toolkit::reexports::client::globals::GlobalList;
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::{self, WlKeyboard};
 use smithay_client_toolkit::reexports::client::protocol::wl_pointer::{self, WlPointer};
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::{self, WlSeat};
+use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::protocol::wl_touch::{self, WlTouch};
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
+use smithay_client_toolkit::reexports::protocols::wp::pointer_constraints::zv1::client::zwp_confined_pointer_v1::ZwpConfinedPointerV1;
+use smithay_client_toolkit::reexports::protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1::ZwpLockedPointerV1;
+use smithay_client_toolkit::reexports::protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::Lifetime;
+use smithay_client_toolkit::reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryHandler};
+use smithay_client_toolkit::seat::pointer_constraints::PointerConstraintsHandler;
 use smithay_client_toolkit::seat::relative_pointer::{RelativeMotionEvent, RelativePointerHandler};
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_backend::protocol::WEnum;
 
-
-use super::input::{AxisFrame, WaylandInputSpecialEvent, WaylandKeyboardEvent, WaylandPointerAxisEvent, WaylandPointerButtonEvent, WaylandPointerMotionEvent, WaylandPointerRelativeMotionEvent, WaylandTouchCancelEvent, WaylandTouchDownEvent, WaylandTouchFrameEvent, WaylandTouchMotionEvent, WaylandTouchUpEvent};
+use super::input::{
+    AxisFrame, WaylandInputSpecialEvent, WaylandKeyboardEvent, WaylandPointerAxisEvent,
+    WaylandPointerButtonEvent, WaylandPointerMotionEvent, WaylandPointerRelativeMotionEvent,
+    WaylandTouchCancelEvent, WaylandTouchDownEvent, WaylandTouchFrameEvent,
+    WaylandTouchMotionEvent, WaylandTouchUpEvent,
+};
 use super::WaylandBackend;
 
 #[derive(Debug)]
@@ -26,9 +35,54 @@ pub struct SeatState {
 
 #[derive(Debug)]
 struct SeatInner {
-    _seat: WlSeat,
+    seat: Seat,
     name: u32,
-    data: Arc<Mutex<SeatDevices>>,
+}
+
+#[derive(Debug, Clone)]
+struct Seat {
+    seat: WlSeat,
+}
+
+impl Seat {
+    fn data(&self) -> &SeatData {
+        self.seat.data().expect("WlSeat has no SeatData")
+    }
+
+    fn lock_pointer(
+        &self,
+        surface: &WlSurface,
+        backend: &WaylandBackend,
+        qh: &QueueHandle<WaylandBackend>,
+    ) {
+        self.data().with_devices_mut(|devices| {
+            let Some(pointer) = &devices.pointer else {
+                return;
+            };
+
+            // Don't bother with a pointer lock if we don't get relative pointer events.
+            // Does there event exist a compositor that implements pointer constraints
+            // but not relative pointer?
+            if devices.relative_pointer.is_none() {
+                return;
+            }
+
+            devices.locked_pointer = devices.locked_pointer.take().or_else(|| {
+                backend
+                    .pointer_constraints_state
+                    .lock_pointer(surface, pointer, None, Lifetime::Persistent, qh)
+                    .ok()
+            });
+        })
+    }
+
+    fn unlock_pointer(&self) {
+        self.data().with_devices_mut(|devices| {
+            if let Some(locked_pointer) = devices.locked_pointer.take() {
+                locked_pointer.destroy();
+            }
+        })
+    }
 }
 
 /// Serves to own as many input devices as possible, for the sole purpose of receiving the
@@ -38,6 +92,7 @@ struct SeatDevices {
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
     relative_pointer: Option<ZwpRelativePointerV1>,
+    locked_pointer: Option<ZwpLockedPointerV1>,
     touch: Option<WlTouch>,
 }
 
@@ -51,17 +106,14 @@ impl RegistryHandler<WaylandBackend> for SeatState {
         _: u32,
     ) {
         if interface == WlSeat::interface().name {
-            let data = Arc::new(Mutex::new(SeatDevices::default()));
             let seat = backend
                 .registry()
-                .bind_specific(qh, name, 1..=7, data.clone())
+                .bind_specific(qh, name, 1..=7, SeatData::default())
                 .expect("failed to bind global");
 
-            backend.seat_state.seats.push(SeatInner {
-                _seat: seat,
-                name,
-                data,
-            });
+            let seat = Seat { seat };
+
+            backend.seat_state.seats.push(SeatInner { seat, name });
         }
     }
 
@@ -77,34 +129,32 @@ impl RegistryHandler<WaylandBackend> for SeatState {
                 .seat_state
                 .seats
                 .iter()
-                .find(|inner| inner.name == name)
+                .find_map(|inner| (inner.name == name).then_some(inner.seat.clone()))
             {
-                let mut devices = seat.data.lock().unwrap();
+                seat.data().with_devices_mut(|devices| {
+                    if let Some(keyboard) = devices.keyboard.take() {
+                        keyboard.release();
+                        backend.send_input_event(InputEvent::DeviceRemoved {
+                            device: keyboard.into(),
+                        });
+                    }
+                    if let Some(relative_pointer) = devices.relative_pointer.take() {
+                        relative_pointer.destroy();
+                    }
+                    if let Some(pointer) = devices.pointer.take() {
+                        pointer.release();
+                        backend.send_input_event(InputEvent::DeviceRemoved {
+                            device: pointer.into(),
+                        });
+                    }
 
-                if let Some(keyboard) = devices.keyboard.take() {
-                    keyboard.release();
-                    backend.send_input_event(InputEvent::DeviceRemoved {
-                        device: keyboard.into(),
-                    });
-                }
-                if let Some(relative_pointer) = devices.relative_pointer.take() {
-                    relative_pointer.destroy();
-                }
-                if let Some(pointer) = devices.pointer.take() {
-                    pointer.release();
-                    backend.send_input_event(InputEvent::DeviceRemoved {
-                        device: pointer.into(),
-                    });
-                }
-
-                if let Some(touch) = devices.touch.take() {
-                    touch.release();
-                    backend.send_input_event(InputEvent::DeviceRemoved {
-                        device: touch.into(),
-                    });
-                }
-
-                drop(devices);
+                    if let Some(touch) = devices.touch.take() {
+                        touch.release();
+                        backend.send_input_event(InputEvent::DeviceRemoved {
+                            device: touch.into(),
+                        });
+                    }
+                });
 
                 backend.seat_state.seats.retain(|inner| inner.name != name);
             }
@@ -127,16 +177,14 @@ impl SeatState {
                     .map(|global| {
                         let version = global.version.min(SEAT_VERSION);
                         let name = global.name;
-                        let data = Arc::new(Mutex::new(SeatDevices::default()));
-                        let seat =
-                            global_list
-                                .registry()
-                                .bind(global.name, version, qh, data.clone());
-                        SeatInner {
-                            _seat: seat,
-                            name,
-                            data,
-                        }
+                        let seat: WlSeat = global_list.registry().bind(
+                            global.name,
+                            version,
+                            qh,
+                            SeatData::default(),
+                        );
+                        let seat = Seat { seat };
+                        SeatInner { seat, name }
                     })
                     .collect(),
             }
@@ -144,12 +192,23 @@ impl SeatState {
     }
 }
 
-impl Dispatch<WlSeat, Arc<Mutex<SeatDevices>>> for WaylandBackend {
+#[derive(Debug, Default)]
+struct SeatData {
+    devices: Mutex<SeatDevices>,
+}
+
+impl SeatData {
+    fn with_devices_mut<T>(&self, f: impl FnOnce(&mut SeatDevices) -> T) -> T {
+        f(&mut self.devices.lock().unwrap())
+    }
+}
+
+impl Dispatch<WlSeat, SeatData> for WaylandBackend {
     fn event(
         backend: &mut Self,
-        proxy: &WlSeat,
+        seat: &WlSeat,
         event: wl_seat::Event,
-        data: &Arc<Mutex<SeatDevices>>,
+        data: &SeatData,
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
@@ -160,79 +219,79 @@ impl Dispatch<WlSeat, Arc<Mutex<SeatDevices>>> for WaylandBackend {
             }
             wl_seat::Event::Capabilities { capabilities } => {
                 let capabilities = wl_seat::Capability::from_bits_truncate(capabilities.into());
-                let mut devices = data.lock().unwrap();
-                let devices: &mut SeatDevices = &mut devices;
 
-                if capabilities.contains(wl_seat::Capability::Keyboard) {
-                    devices.keyboard.get_or_insert_with(|| {
-                        let keyboard = proxy.get_keyboard(qh, ());
-                        backend.send_input_event(InputEvent::DeviceAdded {
-                            device: keyboard.clone().into(),
+                data.with_devices_mut(|devices| {
+                    if capabilities.contains(wl_seat::Capability::Keyboard) {
+                        devices.keyboard.get_or_insert_with(|| {
+                            let keyboard = seat.get_keyboard(qh, Seat { seat: seat.clone() });
+                            backend.send_input_event(InputEvent::DeviceAdded {
+                                device: keyboard.clone().into(),
+                            });
+                            keyboard
                         });
-                        keyboard
-                    });
-                } else if let Some(keyboard) = devices.keyboard.take() {
-                    keyboard.release();
-                    backend.send_input_event(InputEvent::DeviceRemoved {
-                        device: keyboard.into(),
-                    });
-                }
-
-                if capabilities.contains(wl_seat::Capability::Pointer) {
-                    let pointer = devices.pointer.get_or_insert_with(|| {
-                        let pointer = proxy.get_pointer(qh, Mutex::new(Default::default()));
-                        backend.send_input_event(InputEvent::DeviceAdded {
-                            device: pointer.clone().into(),
-                        });
-                        pointer
-                    });
-
-                    devices.relative_pointer = devices.relative_pointer.take().or_else(|| {
-                        backend
-                            .relative_pointer_state
-                            .get_relative_pointer(pointer, qh)
-                            .ok()
-                    });
-                } else {
-                    if let Some(relative_pointer) = devices.relative_pointer.take() {
-                        relative_pointer.destroy();
-                    }
-                    if let Some(pointer) = devices.pointer.take() {
-                        pointer.release();
+                    } else if let Some(keyboard) = devices.keyboard.take() {
+                        keyboard.release();
                         backend.send_input_event(InputEvent::DeviceRemoved {
-                            device: pointer.into(),
+                            device: keyboard.into(),
                         });
                     }
-                }
 
-                if capabilities.contains(wl_seat::Capability::Touch) {
-                    devices.touch.get_or_insert_with(|| {
-                        let touch = proxy.get_touch(qh, ());
-                        backend.send_input_event(InputEvent::DeviceAdded {
-                            device: touch.clone().into(),
+                    if capabilities.contains(wl_seat::Capability::Pointer) {
+                        let pointer = devices.pointer.get_or_insert_with(|| {
+                            let pointer = seat.get_pointer(qh, PointerData::default());
+                            backend.send_input_event(InputEvent::DeviceAdded {
+                                device: pointer.clone().into(),
+                            });
+                            pointer
                         });
-                        touch
-                    });
-                } else if let Some(touch) = devices.touch.take() {
-                    touch.release();
-                    backend.send_input_event(InputEvent::DeviceRemoved {
-                        device: touch.into(),
-                    });
-                }
+
+                        devices.relative_pointer = devices.relative_pointer.take().or_else(|| {
+                            backend
+                                .relative_pointer_state
+                                .get_relative_pointer(pointer, qh)
+                                .ok()
+                        });
+                    } else {
+                        if let Some(relative_pointer) = devices.relative_pointer.take() {
+                            relative_pointer.destroy();
+                        }
+                        if let Some(pointer) = devices.pointer.take() {
+                            pointer.release();
+                            backend.send_input_event(InputEvent::DeviceRemoved {
+                                device: pointer.into(),
+                            });
+                        }
+                    }
+
+                    if capabilities.contains(wl_seat::Capability::Touch) {
+                        devices.touch.get_or_insert_with(|| {
+                            let touch = seat.get_touch(qh, ());
+                            backend.send_input_event(InputEvent::DeviceAdded {
+                                device: touch.clone().into(),
+                            });
+                            touch
+                        });
+                    } else if let Some(touch) = devices.touch.take() {
+                        touch.release();
+                        backend.send_input_event(InputEvent::DeviceRemoved {
+                            device: touch.into(),
+                        });
+                    }
+                });
             }
             _ => unreachable!(),
         }
     }
 }
 
-impl Dispatch<WlKeyboard, ()> for WaylandBackend {
+impl Dispatch<WlKeyboard, Seat> for WaylandBackend {
     fn event(
         backend: &mut Self,
         keyboard: &WlKeyboard,
         event: <WlKeyboard as Proxy>::Event,
-        _: &(),
+        seat: &Seat,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         let keyboard = keyboard.clone();
         match event {
@@ -255,13 +314,6 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                     .map(u32::from_le_bytes)
                     .collect::<Vec<_>>();
 
-                // let keysyms = raw
-                //     .iter()
-                //     .copied()
-                //     // We must add 8 to the keycode for any functions we pass the raw keycode
-                // into per     // wl_keyboard protocol.
-                //     .map(|raw| guard.key_get_one_sym(KeyCode::new(raw + 8)))
-                //     .collect::<Vec<_>>();
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardEnter {
                         keyboard,
@@ -269,12 +321,14 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                         keys: raw.into_iter().collect(),
                     },
                 ));
+                seat.lock_pointer(&surface, backend, qh);
             }
             wl_keyboard::Event::Leave { serial, surface } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardLeave { keyboard, serial },
                 ));
+                seat.unlock_pointer();
             }
             wl_keyboard::Event::Key {
                 serial,
@@ -329,12 +383,23 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
     }
 }
 
-impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
+#[derive(Debug, Default)]
+struct PointerData {
+    axis_frame: Mutex<AxisFrame>,
+}
+
+impl PointerData {
+    fn with_axis_frame_mut<T>(&self, f: impl FnOnce(&mut AxisFrame) -> T) -> T {
+        f(&mut self.axis_frame.lock().unwrap())
+    }
+}
+
+impl Dispatch<WlPointer, PointerData> for WaylandBackend {
     fn event(
         backend: &mut Self,
         proxy: &WlPointer,
         event: <WlPointer as Proxy>::Event,
-        data: &Mutex<AxisFrame>,
+        data: &PointerData,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -428,13 +493,13 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     _ => unreachable!(),
                 };
 
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                axis_frame.time(time);
-                axis_frame[axis].absolute += value;
+                data.with_axis_frame_mut(|axis_frame| {
+                    axis_frame.time(time);
+                    axis_frame[axis].absolute += value;
+                })
             }
             wl_pointer::Event::Frame => {
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                let axis_frame = std::mem::take(axis_frame);
+                let axis_frame = data.with_axis_frame_mut(std::mem::take);
                 backend.send_input_event(InputEvent::PointerAxis {
                     event: WaylandPointerAxisEvent {
                         pointer,
@@ -451,8 +516,7 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     _ => unreachable!(),
                 };
 
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                axis_frame.source = source;
+                data.with_axis_frame_mut(|axis_frame| axis_frame.source = source)
             }
             wl_pointer::Event::AxisStop { time, axis } => {
                 let axis = match axis.into_result().unwrap() {
@@ -461,11 +525,9 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     _ => unreachable!(),
                 };
 
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
                 // We don't actually have an InputEvent interpretation of AxisStop.
                 // So just set the time and ignore the stop, lol.
-                axis_frame.time(time);
-                // axis_frame[axis].stop();
+                data.with_axis_frame_mut(|axis_frame| axis_frame.time(time));
                 let _ = axis;
             }
             wl_pointer::Event::AxisDiscrete { axis, discrete } => {
@@ -474,8 +536,8 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     wl_pointer::Axis::HorizontalScroll => input::Axis::Horizontal,
                     _ => unreachable!(),
                 };
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                axis_frame[axis].v120 += discrete * 120;
+
+                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += discrete * 120)
             }
             wl_pointer::Event::AxisValue120 { axis, value120 } => {
                 let axis = match axis.into_result().unwrap() {
@@ -483,8 +545,8 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     wl_pointer::Axis::HorizontalScroll => input::Axis::Horizontal,
                     _ => unreachable!(),
                 };
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                axis_frame[axis].v120 += value120;
+
+                data.with_axis_frame_mut(|axis_frame| axis_frame[axis].v120 += value120)
             }
             wl_pointer::Event::AxisRelativeDirection { axis, direction } => {
                 let axis = match axis.into_result().unwrap() {
@@ -502,17 +564,17 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
                     _ => unreachable!(),
                 };
 
-                let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
-                axis_frame[axis].relative_direction = direction;
+                data.with_axis_frame_mut(|axis_frame| {
+                    axis_frame[axis].relative_direction = direction
+                })
             }
             _ => todo!(),
         }
 
         if proxy.version() < 5 {
-            let axis_frame: &mut AxisFrame = &mut data.lock().unwrap();
+            let axis_frame = data.with_axis_frame_mut(std::mem::take);
 
-            if *axis_frame != AxisFrame::default() {
-                let axis_frame = std::mem::take(axis_frame);
+            if axis_frame != AxisFrame::default() {
                 backend.send_input_event(InputEvent::PointerAxis {
                     event: WaylandPointerAxisEvent {
                         pointer: proxy.clone(),
@@ -543,6 +605,50 @@ impl RelativePointerHandler for WaylandBackend {
 }
 
 smithay_client_toolkit::delegate_relative_pointer!(WaylandBackend);
+
+impl PointerConstraintsHandler for WaylandBackend {
+    fn confined(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpConfinedPointerV1,
+        _: &WlSurface,
+        _: &WlPointer,
+    ) {
+    }
+
+    fn unconfined(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpConfinedPointerV1,
+        _: &WlSurface,
+        _: &WlPointer,
+    ) {
+    }
+
+    fn locked(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpLockedPointerV1,
+        _: &WlSurface,
+        _: &WlPointer,
+    ) {
+    }
+
+    fn unlocked(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpLockedPointerV1,
+        _: &WlSurface,
+        _: &WlPointer,
+    ) {
+    }
+}
+
+smithay_client_toolkit::delegate_pointer_constraints!(WaylandBackend);
 
 impl Dispatch<WlTouch, ()> for WaylandBackend {
     fn event(
