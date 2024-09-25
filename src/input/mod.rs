@@ -67,9 +67,16 @@ impl<I: InputBackend<SpecialEvent = UnusedEvent>> ProcessSpecialEvent<I> for Sta
 impl ProcessSpecialEvent<WaylandInputBackend> for State {
     fn on_special_event(&mut self, event: WaylandInputSpecialEvent) {
         match event {
-            WaylandInputSpecialEvent::PointerEnter { pointer, serial } => {
+            WaylandInputSpecialEvent::PointerEnter {
+                pointer,
+                serial,
+                surface_x,
+                surface_y,
+            } => {
                 // Hide the cursor; we are compositing our own.
                 pointer.set_cursor(serial, None, 0, 0);
+
+                self.move_cursor((surface_x, surface_y).into());
             }
             WaylandInputSpecialEvent::PointerLeave { .. } => {
                 // Hide our cursor; the pointer isn't on our surface anymore.

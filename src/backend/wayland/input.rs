@@ -420,6 +420,8 @@ pub enum WaylandInputSpecialEvent {
     PointerEnter {
         pointer: WlPointer,
         serial: u32,
+        surface_x: f64,
+        surface_y: f64,
     },
     PointerLeave {
         pointer: WlPointer,

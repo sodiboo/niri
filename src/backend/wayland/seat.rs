@@ -364,11 +364,19 @@ impl Dispatch<WlPointer, Mutex<AxisFrame>> for WaylandBackend {
 
         match event {
             wl_pointer::Event::Enter {
-                serial, surface, ..
+                serial,
+                surface,
+                surface_x,
+                surface_y,
             } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
                 backend.send_input_event(InputEvent::Special(
-                    WaylandInputSpecialEvent::PointerEnter { pointer, serial },
+                    WaylandInputSpecialEvent::PointerEnter {
+                        pointer,
+                        serial,
+                        surface_x,
+                        surface_y,
+                    },
                 ));
             }
             wl_pointer::Event::Leave { serial, surface } => {
