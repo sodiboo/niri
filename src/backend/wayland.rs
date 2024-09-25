@@ -22,7 +22,7 @@ use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
-use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
+use smithay_client_toolkit::reexports::client::Connection;
 use smithay_client_toolkit::registry::RegistryState;
 use smithay_client_toolkit::seat::relative_pointer::RelativePointerState;
 use smithay_client_toolkit::shell::xdg::window::WindowDecorations;
@@ -48,8 +48,6 @@ use seat::SeatState;
 pub struct WaylandBackend {
     config: Rc<RefCell<Config>>,
     events: Sender<WaylandBackendEvent>,
-
-    qh: QueueHandle<Self>,
 
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -219,8 +217,6 @@ impl WaylandBackend {
         Ok(Self {
             config,
             events,
-
-            qh,
 
             registry_state,
             seat_state,
