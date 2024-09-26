@@ -64,6 +64,9 @@ pub struct WaylandBackend {
     // refresh.
     locked_pointers: Vec<ZwpLockedPointerV1>,
 
+    // Also used to avoid running logic on every refresh if the cursor hasn't moved.
+    prev_cursor_location: Point<f64, Logical>,
+
     output: Output,
     damage_tracker: OutputDamageTracker,
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -232,6 +235,7 @@ impl WaylandBackend {
             pointer_constraints_state,
 
             locked_pointers: Vec::new(),
+            prev_cursor_location: Point::default(),
 
             output,
             damage_tracker,
@@ -252,8 +256,21 @@ impl WaylandBackend {
     }
 
     pub fn set_cursor_position_hint(&mut self, location: Point<f64, Logical>) {
-        for locked_pointer in &self.locked_pointers {
-            locked_pointer.set_cursor_position_hint(location.x, location.y);
+        if location == std::mem::replace(&mut self.prev_cursor_location, location) {
+            return;
+        }
+        if location.x == 0.0
+            || location.y == 0.0
+            || location.x + 1.0 == self.graphics.window_size().w as f64
+            || location.y + 1.0 == self.graphics.window_size().h as f64
+        {
+            for seat in self.seat_state.seats() {
+                seat.unlock_pointer(self);
+            }
+        } else {
+            for locked_pointer in &self.locked_pointers {
+                locked_pointer.set_cursor_position_hint(location.x, location.y);
+            }
         }
     }
 

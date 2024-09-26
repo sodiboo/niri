@@ -33,6 +33,12 @@ pub struct SeatState {
     seats: Vec<SeatInner>,
 }
 
+impl SeatState {
+    pub fn seats(&self) -> Vec<Seat> {
+        self.seats.iter().map(|inner| inner.seat.clone()).collect()
+    }
+}
+
 #[derive(Debug)]
 struct SeatInner {
     seat: Seat,
@@ -40,7 +46,7 @@ struct SeatInner {
 }
 
 #[derive(Debug, Clone)]
-struct Seat {
+pub struct Seat {
     seat: WlSeat,
 }
 
@@ -49,7 +55,7 @@ impl Seat {
         self.seat.data().expect("WlSeat has no SeatData")
     }
 
-    fn lock_pointer(
+    pub fn lock_pointer(
         &self,
         surface: &WlSurface,
         backend: &mut WaylandBackend,
@@ -79,7 +85,7 @@ impl Seat {
         })
     }
 
-    fn unlock_pointer(&self, backend: &mut WaylandBackend) {
+    pub fn unlock_pointer(&self, backend: &mut WaylandBackend) {
         self.data().with_devices_mut(|devices| {
             if let Some(locked_pointer) = devices.locked_pointer.take() {
                 locked_pointer.destroy();
@@ -231,7 +237,7 @@ impl Dispatch<WlSeat, SeatData> for WaylandBackend {
                 data.with_devices_mut(|devices| {
                     if capabilities.contains(wl_seat::Capability::Keyboard) {
                         devices.keyboard.get_or_insert_with(|| {
-                            let keyboard = seat.get_keyboard(qh, Seat { seat: seat.clone() });
+                            let keyboard = seat.get_keyboard(qh, ());
                             backend.send_input_event(InputEvent::DeviceAdded {
                                 device: keyboard.clone().into(),
                             });
@@ -246,7 +252,10 @@ impl Dispatch<WlSeat, SeatData> for WaylandBackend {
 
                     if capabilities.contains(wl_seat::Capability::Pointer) {
                         let pointer = devices.pointer.get_or_insert_with(|| {
-                            let pointer = seat.get_pointer(qh, PointerData::default());
+                            let pointer = seat.get_pointer(
+                                qh,
+                                PointerData::from_seat(Seat { seat: seat.clone() }),
+                            );
                             backend.send_input_event(InputEvent::DeviceAdded {
                                 device: pointer.clone().into(),
                             });
@@ -292,14 +301,14 @@ impl Dispatch<WlSeat, SeatData> for WaylandBackend {
     }
 }
 
-impl Dispatch<WlKeyboard, Seat> for WaylandBackend {
+impl Dispatch<WlKeyboard, ()> for WaylandBackend {
     fn event(
         backend: &mut Self,
         keyboard: &WlKeyboard,
         event: <WlKeyboard as Proxy>::Event,
-        seat: &Seat,
+        _: &(),
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _: &QueueHandle<Self>,
     ) {
         let keyboard = keyboard.clone();
         match event {
@@ -329,14 +338,12 @@ impl Dispatch<WlKeyboard, Seat> for WaylandBackend {
                         keys: raw.into_iter().collect(),
                     },
                 ));
-                seat.lock_pointer(&surface, backend, qh);
             }
             wl_keyboard::Event::Leave { serial, surface } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardLeave { keyboard, serial },
                 ));
-                seat.unlock_pointer(backend);
             }
             wl_keyboard::Event::Key {
                 serial,
@@ -391,12 +398,20 @@ impl Dispatch<WlKeyboard, Seat> for WaylandBackend {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PointerData {
+    seat: Seat,
     axis_frame: Mutex<AxisFrame>,
 }
 
 impl PointerData {
+    fn from_seat(seat: Seat) -> Self {
+        PointerData {
+            seat,
+            axis_frame: Mutex::new(AxisFrame::default()),
+        }
+    }
+
     fn with_axis_frame_mut<T>(&self, f: impl FnOnce(&mut AxisFrame) -> T) -> T {
         f(&mut self.axis_frame.lock().unwrap())
     }
@@ -409,7 +424,7 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
         event: <WlPointer as Proxy>::Event,
         data: &PointerData,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         let pointer = proxy.clone();
 
@@ -443,6 +458,7 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                 surface_y,
             } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
+                data.seat.lock_pointer(&surface, backend, qh);
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::PointerEnter {
                         pointer,
@@ -463,6 +479,11 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                 surface_x,
                 surface_y,
             } => {
+                data.seat.lock_pointer(
+                    &backend.graphics.window().wl_surface().clone(),
+                    backend,
+                    qh,
+                );
                 backend.send_input_event(InputEvent::PointerMotionAbsolute {
                     event: WaylandPointerMotionEvent {
                         pointer,
