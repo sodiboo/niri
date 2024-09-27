@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use calloop::channel::Sender;
-use niri_config::{Config, OutputName};
+use niri_config::{Action, Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::input::InputEvent;
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -113,7 +113,7 @@ impl WaylandBackend {
                 match event {
                     WaylandBackendEvent::Input(event) => state.process_input_event(event),
                     WaylandBackendEvent::Frame => niri.queue_redraw(&backend.output),
-                    WaylandBackendEvent::Close => niri.stop_signal.stop(),
+                    WaylandBackendEvent::Close => state.do_action(Action::Quit(false), true),
                     WaylandBackendEvent::Resize => {
                         let size = backend.graphics.window_size();
                         debug!("Resizing window to {}x{}", size.w, size.h);
