@@ -259,6 +259,10 @@ impl WaylandBackend {
         if location == std::mem::replace(&mut self.prev_cursor_location, location) {
             return;
         }
+        for locked_pointer in &self.locked_pointers {
+            locked_pointer.set_cursor_position_hint(location.x, location.y);
+        }
+
         if location.x == 0.0
             || location.y == 0.0
             || location.x + 1.0 == self.graphics.window_size().w as f64
@@ -266,10 +270,6 @@ impl WaylandBackend {
         {
             for seat in self.seat_state.seats() {
                 seat.unlock_pointer(self);
-            }
-        } else {
-            for locked_pointer in &self.locked_pointers {
-                locked_pointer.set_cursor_position_hint(location.x, location.y);
             }
         }
     }
