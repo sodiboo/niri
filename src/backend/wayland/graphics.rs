@@ -160,9 +160,7 @@ impl WaylandGraphicsBackend {
 
         let mut damage = damage
             .iter()
-            .map(|&rect| {
-                transform.invert().transform_rect_in(rect, &output_area)
-            })
+            .map(|&rect| transform.invert().transform_rect_in(rect, &output_area))
             .collect::<Vec<_>>();
 
         self.request_frame_callback();
