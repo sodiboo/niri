@@ -263,6 +263,9 @@ impl WaylandBackend {
             locked_pointer.set_cursor_position_hint(location.x, location.y);
         }
 
+        // Adding + 1.0 looks like a hack. It becomes clear why this is done if you consider that
+        // pixels are 0-indexed, so 0 resepents the left edge and width-1 represents the right edge.
+        // The same goes for the top and bottom edges.
         if location.x == 0.0
             || location.y == 0.0
             || location.x + 1.0 == self.graphics.window_size().w as f64
