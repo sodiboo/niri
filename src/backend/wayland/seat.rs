@@ -227,9 +227,8 @@ impl Dispatch<WlSeat, SeatData> for WaylandBackend {
         qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_seat::Event::Name { name } => {
+            wl_seat::Event::Name { .. } => {
                 // we don't care about the name lol
-                debug!("Seat name: {name}");
             }
             wl_seat::Event::Capabilities { capabilities } => {
                 let capabilities = wl_seat::Capability::from_bits_truncate(capabilities.into());

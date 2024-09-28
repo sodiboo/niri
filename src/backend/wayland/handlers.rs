@@ -114,8 +114,6 @@ impl WindowHandler for WaylandBackend {
             self.graphics.set_window_size(new_size);
             self.events.send(WaylandBackendEvent::Resize).unwrap();
         }
-
-        // let dmabuf = Dmabuf::builder((600, 800));
     }
 }
 

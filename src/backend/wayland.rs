@@ -1,5 +1,3 @@
-// #![allow(unused_imports, unused_variables)]
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
@@ -390,8 +388,6 @@ impl WaylandBackend {
 
         output_state.frame_callback_sequence = output_state.frame_callback_sequence.wrapping_add(1);
 
-        // FIXME: this should wait until a frame callback from the host compositor, but it redraws
-        // right away instead.
         if output_state.unfinished_animations_remain {
             self.graphics.request_frame_callback();
         }
