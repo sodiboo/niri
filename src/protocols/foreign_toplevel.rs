@@ -83,6 +83,16 @@ impl ForeignToplevelManagerState {
             toplevels: HashMap::new(),
         }
     }
+
+    pub fn get_identifier(&self, handle: &ExtForeignToplevelHandleV1) -> Option<MappedId> {
+        self.toplevels.values().find_map(|data| {
+            if data.ext_instances.contains(handle) {
+                Some(data.identifier)
+            } else {
+                None
+            }
+        })
+    }
 }
 
 pub fn refresh(state: &mut State) {

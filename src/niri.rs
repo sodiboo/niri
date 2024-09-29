@@ -122,6 +122,7 @@ use crate::layout::workspace::WorkspaceId;
 use crate::layout::{Layout, LayoutElement as _, MonitorRenderElement};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
+use crate::protocols::image_copy_capture::ImageCopyCaptureState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
@@ -221,6 +222,7 @@ pub struct Niri {
     pub layer_shell_state: WlrLayerShellState,
     pub session_lock_state: SessionLockManagerState,
     pub foreign_toplevel_state: ForeignToplevelManagerState,
+    pub image_copy_capture_state: ImageCopyCaptureState,
     pub wlr_screencopy_state: WlrScreencopyManagerState,
     pub output_management_state: OutputManagementManagerState,
     pub viewporter_state: ViewporterState,
@@ -1703,6 +1705,11 @@ impl Niri {
                 !client.get_data::<ClientState>().unwrap().restricted
             });
         output_management_state.on_config_changed(config_.outputs.clone());
+        let image_copy_capture_state = ImageCopyCaptureState::new::<State>(
+            &display_handle,
+            |client| !client.get_data::<ClientState>().unwrap().restricted,
+            |client| !client.get_data::<ClientState>().unwrap().restricted,
+        );
         let wlr_screencopy_state =
             WlrScreencopyManagerState::new::<State, _>(&display_handle, |client| {
                 !client.get_data::<ClientState>().unwrap().restricted
@@ -1854,6 +1861,7 @@ impl Niri {
             session_lock_state,
             foreign_toplevel_state,
             output_management_state,
+            image_copy_capture_state,
             wlr_screencopy_state,
             viewporter_state,
             xdg_foreign_state,
