@@ -71,7 +71,7 @@ impl ScreencopyQueue {
 }
 
 #[derive(Default)]
-pub struct ScreencopyManagerState {
+pub struct WlrScreencopyManagerState {
     queues: HashMap<ZwlrScreencopyManagerV1, ScreencopyQueue>,
 }
 
@@ -79,13 +79,13 @@ pub struct ScreencopyManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
-impl ScreencopyManagerState {
+impl WlrScreencopyManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
         D: Dispatch<ZwlrScreencopyManagerV1, ()>,
         D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-        D: ScreencopyHandler,
+        D: WlrScreencopyHandler,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
@@ -120,12 +120,12 @@ impl ScreencopyManagerState {
 }
 
 impl<D> GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData, D>
-    for ScreencopyManagerState
+    for WlrScreencopyManagerState
 where
     D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
     D: Dispatch<ZwlrScreencopyManagerV1, ()>,
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-    D: ScreencopyHandler,
+    D: WlrScreencopyHandler,
     D: 'static,
 {
     fn bind(
@@ -137,7 +137,7 @@ where
         data_init: &mut DataInit<'_, D>,
     ) {
         let manager = data_init.init(manager, ());
-        state.screencopy_state().bind(&manager);
+        state.wlr_screencopy_state().bind(&manager);
     }
 
     fn can_view(client: Client, global_data: &ScreencopyManagerGlobalData) -> bool {
@@ -145,12 +145,12 @@ where
     }
 }
 
-impl<D> Dispatch<ZwlrScreencopyManagerV1, (), D> for ScreencopyManagerState
+impl<D> Dispatch<ZwlrScreencopyManagerV1, (), D> for WlrScreencopyManagerState
 where
     D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
     D: Dispatch<ZwlrScreencopyManagerV1, ()>,
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-    D: ScreencopyHandler,
+    D: WlrScreencopyHandler,
     D: 'static,
 {
     fn request(
@@ -277,27 +277,27 @@ where
 }
 
 /// Handler trait for wlr-screencopy.
-pub trait ScreencopyHandler {
+pub trait WlrScreencopyHandler {
     /// Handle new screencopy request.
     fn frame(&mut self, manager: &ZwlrScreencopyManagerV1, screencopy: Screencopy);
-    fn screencopy_state(&mut self) -> &mut ScreencopyManagerState;
+    fn wlr_screencopy_state(&mut self) -> &mut WlrScreencopyManagerState;
 }
 
 #[allow(missing_docs)]
 #[macro_export]
-macro_rules! delegate_screencopy {
+macro_rules! delegate_wlr_screencopy {
     ($(@<$( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+>)? $ty: ty) => {
         smithay::reexports::wayland_server::delegate_global_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
             smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1: $crate::protocols::wlr_screencopy::ScreencopyManagerGlobalData
-        ] => $crate::protocols::wlr_screencopy::ScreencopyManagerState);
+        ] => $crate::protocols::wlr_screencopy::WlrScreencopyManagerState);
 
         smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
             smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1: ()
-        ] => $crate::protocols::wlr_screencopy::ScreencopyManagerState);
+        ] => $crate::protocols::wlr_screencopy::WlrScreencopyManagerState);
 
         smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
             smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1: $crate::protocols::wlr_screencopy::ScreencopyFrameState
-        ] => $crate::protocols::wlr_screencopy::ScreencopyManagerState);
+        ] => $crate::protocols::wlr_screencopy::WlrScreencopyManagerState);
     };
 }
 
@@ -318,10 +318,10 @@ pub enum ScreencopyFrameState {
     },
 }
 
-impl<D> Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState, D> for ScreencopyManagerState
+impl<D> Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState, D> for WlrScreencopyManagerState
 where
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-    D: ScreencopyHandler,
+    D: WlrScreencopyHandler,
     D: 'static,
 {
     fn request(

@@ -80,11 +80,13 @@ use crate::protocols::virtual_pointer::{
     VirtualPointerInputBackend, VirtualPointerManagerState, VirtualPointerMotionAbsoluteEvent,
     VirtualPointerMotionEvent,
 };
-use crate::protocols::wlr_screencopy::{Screencopy, ScreencopyHandler, ScreencopyManagerState};
+use crate::protocols::wlr_screencopy::{
+    Screencopy, WlrScreencopyHandler, WlrScreencopyManagerState,
+};
 use crate::utils::{output_size, send_scale_transform};
 use crate::{
     delegate_foreign_toplevel, delegate_gamma_control, delegate_mutter_x11_interop,
-    delegate_output_management, delegate_screencopy, delegate_virtual_pointer,
+    delegate_output_management, delegate_virtual_pointer, delegate_wlr_screencopy,
 };
 
 impl SeatHandler for State {
@@ -449,12 +451,12 @@ impl ForeignToplevelHandler for State {
 }
 delegate_foreign_toplevel!(State);
 
-impl ScreencopyHandler for State {
+impl WlrScreencopyHandler for State {
     fn frame(&mut self, manager: &ZwlrScreencopyManagerV1, screencopy: Screencopy) {
         // If with_damage then push it onto the queue for redraw of the output,
         // otherwise render it immediately.
         if screencopy.with_damage() {
-            let Some(queue) = self.niri.screencopy_state.get_queue_mut(manager) else {
+            let Some(queue) = self.niri.wlr_screencopy_state.get_queue_mut(manager) else {
                 trace!("screencopy manager destroyed already");
                 return;
             };
@@ -471,11 +473,11 @@ impl ScreencopyHandler for State {
         }
     }
 
-    fn screencopy_state(&mut self) -> &mut ScreencopyManagerState {
-        &mut self.niri.screencopy_state
+    fn wlr_screencopy_state(&mut self) -> &mut WlrScreencopyManagerState {
+        &mut self.niri.wlr_screencopy_state
     }
 }
-delegate_screencopy!(State);
+delegate_wlr_screencopy!(State);
 
 impl VirtualPointerHandler for State {
     fn virtual_pointer_manager_state(&mut self) -> &mut VirtualPointerManagerState {

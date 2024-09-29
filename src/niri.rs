@@ -125,7 +125,7 @@ use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
-use crate::protocols::wlr_screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
+use crate::protocols::wlr_screencopy::{Screencopy, ScreencopyBuffer, WlrScreencopyManagerState};
 use crate::pw_utils::{Cast, PipeWire};
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::pw_utils::{CastSizeChange, CastTarget, PwToNiri};
@@ -221,7 +221,7 @@ pub struct Niri {
     pub layer_shell_state: WlrLayerShellState,
     pub session_lock_state: SessionLockManagerState,
     pub foreign_toplevel_state: ForeignToplevelManagerState,
-    pub screencopy_state: ScreencopyManagerState,
+    pub wlr_screencopy_state: WlrScreencopyManagerState,
     pub output_management_state: OutputManagementManagerState,
     pub viewporter_state: ViewporterState,
     pub xdg_foreign_state: XdgForeignState,
@@ -1703,9 +1703,10 @@ impl Niri {
                 !client.get_data::<ClientState>().unwrap().restricted
             });
         output_management_state.on_config_changed(config_.outputs.clone());
-        let screencopy_state = ScreencopyManagerState::new::<State, _>(&display_handle, |client| {
-            !client.get_data::<ClientState>().unwrap().restricted
-        });
+        let wlr_screencopy_state =
+            WlrScreencopyManagerState::new::<State, _>(&display_handle, |client| {
+                !client.get_data::<ClientState>().unwrap().restricted
+            });
         let viewporter_state = ViewporterState::new::<State>(&display_handle);
         let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
 
@@ -1853,7 +1854,7 @@ impl Niri {
             session_lock_state,
             foreign_toplevel_state,
             output_management_state,
-            screencopy_state,
+            wlr_screencopy_state,
             viewporter_state,
             xdg_foreign_state,
             text_input_state,
@@ -3920,10 +3921,10 @@ impl Niri {
     ) {
         let _span = tracy_client::span!("Niri::render_for_screencopy_with_damage");
 
-        let mut screencopy_state = mem::take(&mut self.screencopy_state);
+        let mut wlr_screencopy_state = mem::take(&mut self.wlr_screencopy_state);
         let elements = OnceCell::new();
 
-        for queue in screencopy_state.queues_mut() {
+        for queue in wlr_screencopy_state.queues_mut() {
             let (damage_tracker, screencopy) = queue.split();
             if let Some(screencopy) = screencopy {
                 if screencopy.output() == output {
@@ -3972,7 +3973,7 @@ impl Niri {
             }
         }
 
-        self.screencopy_state = screencopy_state;
+        self.wlr_screencopy_state = wlr_screencopy_state;
     }
 
     pub fn render_for_screencopy_without_damage(
@@ -3997,7 +3998,7 @@ impl Niri {
             screencopy.overlay_cursor(),
             RenderTarget::ScreenCapture,
         );
-        let Some(queue) = self.screencopy_state.get_queue_mut(manager) else {
+        let Some(queue) = self.wlr_screencopy_state.get_queue_mut(manager) else {
             bail!("screencopy manager destroyed already");
         };
         let damage_tracker = queue.split().0;
@@ -4141,7 +4142,7 @@ impl Niri {
 
     pub fn remove_screencopy_output(&mut self, output: &Output) {
         let _span = tracy_client::span!("Niri::remove_screencopy_output");
-        for queue in self.screencopy_state.queues_mut() {
+        for queue in self.wlr_screencopy_state.queues_mut() {
             queue.remove_output(output);
         }
     }
