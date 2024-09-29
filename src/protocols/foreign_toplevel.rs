@@ -429,7 +429,7 @@ where
                 state.ext_instances.retain(|x| x != resource);
             }
             ext_foreign_toplevel_list_v1::Request::Destroy => {}
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 

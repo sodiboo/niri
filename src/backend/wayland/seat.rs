@@ -596,7 +596,7 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                     axis_frame[axis].relative_direction = direction
                 })
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
 
         if proxy.version() < 5 {
@@ -758,7 +758,7 @@ impl Dispatch<WlTouch, ()> for WaylandBackend {
             wl_touch::Event::Orientation { .. } => {
                 // InputEvent can't handle WlTouch::Orientation.
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 }
