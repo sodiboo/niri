@@ -444,6 +444,8 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                         serial,
                         surface_x,
                         surface_y,
+                        transform: backend.output.current_transform(),
+                        window_size: backend.graphics.window_size(),
                     },
                 ));
             }
@@ -469,6 +471,7 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                         time,
                         x: surface_x,
                         y: surface_y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                     },
                 });
@@ -607,6 +610,7 @@ impl RelativePointerHandler for WaylandBackend {
             event: WaylandPointerRelativeMotionEvent {
                 pointer: pointer.clone(),
                 relative_motion: event,
+                transform: self.output.current_transform(),
             },
         })
     }
@@ -685,6 +689,7 @@ impl Dispatch<WlTouch, ()> for WaylandBackend {
                         slot: Some(id as u32).into(),
                         x,
                         y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                         serial,
                     },
@@ -708,6 +713,7 @@ impl Dispatch<WlTouch, ()> for WaylandBackend {
                         slot: Some(id as u32).into(),
                         x,
                         y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                     },
                 });

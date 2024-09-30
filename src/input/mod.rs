@@ -72,11 +72,21 @@ impl ProcessSpecialEvent<WaylandInputBackend> for State {
                 serial,
                 surface_x,
                 surface_y,
+                transform,
+                window_size,
             } => {
                 // Hide the cursor; we are compositing our own.
                 pointer.set_cursor(serial, None, 0, 0);
 
-                self.move_cursor((surface_x, surface_y).into());
+                self.move_cursor(
+                    crate::backend::wayland::RawAbsolutePosition::new(
+                        surface_x,
+                        surface_y,
+                        transform,
+                        window_size,
+                    )
+                    .position(),
+                );
             }
             WaylandInputSpecialEvent::PointerLeave { .. } => {
                 // Hide our cursor; the pointer isn't on our surface anymore.

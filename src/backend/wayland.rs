@@ -15,12 +15,12 @@ use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
-use smithay::utils::{Logical, Point};
+use smithay::utils::{Logical, Point, Transform};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
-use smithay_client_toolkit::reexports::client::protocol::wl_output::Transform;
+use smithay_client_toolkit::reexports::client::protocol::wl_output;
 use smithay_client_toolkit::reexports::client::Connection;
 use smithay_client_toolkit::reexports::protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1::ZwpLockedPointerV1;
 use smithay_client_toolkit::registry::RegistryState;
@@ -42,7 +42,7 @@ mod input;
 pub mod seat;
 
 use graphics::WaylandGraphicsBackend;
-pub use input::{WaylandInputBackend, WaylandInputSpecialEvent};
+pub use input::{RawAbsolutePosition, WaylandInputBackend, WaylandInputSpecialEvent};
 use seat::SeatState;
 
 #[allow(dead_code)]
@@ -208,7 +208,7 @@ impl WaylandBackend {
         // This transform is necessary to make the window appear right-side up.
         // It will never change throughout the lifetime of the window.
         main_window
-            .set_buffer_transform(Transform::Flipped180)
+            .set_buffer_transform(wl_output::Transform::Flipped180)
             .unwrap();
 
         main_window.set_app_id("niri");
@@ -257,6 +257,23 @@ impl WaylandBackend {
         if location == std::mem::replace(&mut self.prev_cursor_location, location) {
             return;
         }
+
+        // debug!("inner location: {:?}", location,);
+        let transform = self.output.current_transform();
+
+        // HACK: ??? the non-flipped variants are fine.
+        let transform = match transform {
+            Transform::Flipped90 => Transform::Flipped270,
+            Transform::Flipped270 => Transform::Flipped90,
+            other => other,
+        };
+
+        let output_area = transform.transform_size(self.graphics.window_size());
+
+        let location =
+            RawAbsolutePosition::new(location.x, location.y, transform.invert(), output_area)
+                .position();
+
         for locked_pointer in &self.locked_pointers {
             locked_pointer.set_cursor_position_hint(location.x, location.y);
         }
