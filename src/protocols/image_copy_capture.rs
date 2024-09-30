@@ -88,7 +88,10 @@ impl ImageCopyCaptureState {
             },
         );
 
-        display.create_global::<D, ExtImageCopyCaptureManagerV1, _>(IMAGE_COPY_CAPTURE_VERSION, ());
+        // display.create_global::<D, ExtImageCopyCaptureManagerV1, _>(
+        //     IMAGE_COPY_CAPTURE_VERSION,
+        //     (),
+        // );
 
         Self {
             sessions: Vec::new(),
