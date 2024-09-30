@@ -254,10 +254,6 @@ impl WaylandBackend {
     }
 
     pub fn set_cursor_position_hint(&mut self, location: Point<f64, Logical>) {
-        if location == std::mem::replace(&mut self.prev_cursor_location, location) {
-            return;
-        }
-
         // debug!("inner location: {:?}", location,);
         let transform = self.output.current_transform();
 
@@ -273,6 +269,10 @@ impl WaylandBackend {
         let location =
             RawAbsolutePosition::new(location.x, location.y, transform.invert(), output_area)
                 .position();
+
+        if location == std::mem::replace(&mut self.prev_cursor_location, location) {
+            return;
+        }
 
         for locked_pointer in &self.locked_pointers {
             locked_pointer.set_cursor_position_hint(location.x, location.y);
