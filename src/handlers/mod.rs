@@ -73,7 +73,9 @@ use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
 use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
-use crate::protocols::image_copy_capture::{ImageCopyCaptureHandler, ImageCopyCaptureState};
+use crate::protocols::image_copy_capture::{
+    self, ImageCaptureSource, ImageCopyCaptureHandler, ImageCopyCaptureState,
+};
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};
 use crate::protocols::virtual_pointer::{
@@ -456,6 +458,44 @@ delegate_foreign_toplevel!(State);
 impl ImageCopyCaptureHandler for State {
     fn image_capture_state(&mut self) -> &mut ImageCopyCaptureState {
         &mut self.niri.image_copy_capture_state
+    }
+
+    fn capture_source(
+        &mut self,
+        source: &ImageCaptureSource,
+    ) -> Option<image_copy_capture::BufferConstraints> {
+        todo!()
+    }
+
+    fn capture_cursor_source(
+        &mut self,
+        source: &ImageCaptureSource,
+    ) -> Option<image_copy_capture::BufferConstraints> {
+        todo!()
+    }
+
+    fn new_session(&mut self, session: image_copy_capture::Session) {
+        todo!()
+    }
+
+    fn new_cursor_session(&mut self, session: image_copy_capture::CursorSession) {
+        todo!()
+    }
+
+    fn frame(&mut self, session: image_copy_capture::Session, frame: image_copy_capture::Frame) {
+        todo!()
+    }
+
+    fn cursor_frame(
+        &mut self,
+        session: image_copy_capture::CursorSession,
+        frame: image_copy_capture::Frame,
+    ) {
+        todo!()
+    }
+
+    fn frame_aborted(&mut self, frame: image_copy_capture::Frame) {
+        todo!()
     }
 }
 

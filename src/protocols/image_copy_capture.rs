@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 
-use smithay::{output::{Output, WeakOutput}, reexports::{wayland_protocols::ext::{image_capture_source::v1::server::{ext_foreign_toplevel_image_capture_source_manager_v1::{self, ExtForeignToplevelImageCaptureSourceManagerV1}, ext_image_capture_source_v1::{self, ExtImageCaptureSourceV1}, ext_output_image_capture_source_manager_v1::{self, ExtOutputImageCaptureSourceManagerV1}}, image_copy_capture::v1::server::{ext_image_copy_capture_cursor_session_v1::{self, ExtImageCopyCaptureCursorSessionV1}, ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1}, ext_image_copy_capture_manager_v1::{self, ExtImageCopyCaptureManagerV1}, ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1}}}, wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New}}};
+use smithay::{backend::{allocator::{Fourcc, Modifier}, drm::DrmNode}, output::{Output, WeakOutput}, reexports::{wayland_protocols::ext::{image_capture_source::v1::server::{ext_foreign_toplevel_image_capture_source_manager_v1::{self, ExtForeignToplevelImageCaptureSourceManagerV1}, ext_image_capture_source_v1::{self, ExtImageCaptureSourceV1}, ext_output_image_capture_source_manager_v1::{self, ExtOutputImageCaptureSourceManagerV1}}, image_copy_capture::v1::server::{ext_image_copy_capture_cursor_session_v1::{self, ExtImageCopyCaptureCursorSessionV1}, ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1, FailureReason}, ext_image_copy_capture_manager_v1::{self, ExtImageCopyCaptureManagerV1}, ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1}}}, wayland_server::{protocol::wl_shm, Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource}}, utils::{Buffer, Size}};
 
 use crate::window::mapped::MappedId;
 
@@ -18,6 +18,24 @@ pub enum ImageCaptureSource {
 
 pub trait ImageCopyCaptureHandler {
     fn image_capture_state(&mut self) -> &mut ImageCopyCaptureState;
+
+    fn capture_source(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints>;
+    fn capture_cursor_source(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints>;
+
+    fn new_session(&mut self, session: Session);
+    fn new_cursor_session(&mut self, session: CursorSession);
+
+    fn frame(&mut self, session: Session, frame: Frame);
+    fn cursor_frame(&mut self, session: CursorSession, frame: Frame);
+
+    fn frame_aborted(&mut self, frame: Frame);
+
+    fn session_destroyed(&mut self, session: Session) {
+        let _ = session;
+    }
+    fn cursor_session_destroyed(&mut self, session: CursorSession) {
+        let _ = session;
+    }
 }
 
 // Security note: These filters are applied to each way to construct an image capture source, such
@@ -37,9 +55,8 @@ pub struct ImageCaptureSourceGlobalData {
 }
 
 pub struct ImageCopyCaptureState {
-    foreign_toplevel_source_managers: HashSet<ExtForeignToplevelImageCaptureSourceManagerV1>,
-    output_source_managers: HashSet<ExtOutputImageCaptureSourceManagerV1>,
-    image_copy_capture_managers: HashSet<ExtImageCopyCaptureManagerV1>,
+    sessions: Vec<Session>,
+    cursor_sessions: Vec<CursorSession>,
 }
 
 impl ImageCopyCaptureState {
@@ -74,10 +91,96 @@ impl ImageCopyCaptureState {
         display.create_global::<D, ExtImageCopyCaptureManagerV1, _>(IMAGE_COPY_CAPTURE_VERSION, ());
 
         Self {
-            foreign_toplevel_source_managers: HashSet::new(),
-            output_source_managers: HashSet::new(),
-            image_copy_capture_managers: HashSet::new(),
+            sessions: Vec::new(),
+            cursor_sessions: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BufferConstraints {
+    pub size: Size<i32, Buffer>,
+    pub shm: Vec<wl_shm::Format>,
+    pub dma: Option<DmabufConstraints>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DmabufConstraints {
+    pub node: DrmNode,
+    pub formats: Vec<(Fourcc, Vec<Modifier>)>,
+}
+
+pub struct Session {
+    obj: ExtImageCopyCaptureSessionV1,
+    source: ImageCaptureSource,
+
+    stopped: bool,
+    draw_cursors: bool,
+
+    constraints: Option<BufferConstraints>,
+
+    frame: Option<Frame>,
+}
+
+pub struct CursorSession {
+    obj: ExtImageCopyCaptureCursorSessionV1,
+    capture_session: Option<ExtImageCopyCaptureSessionV1>,
+    source: ImageCaptureSource,
+
+    stopped: bool,
+
+    constraints: Option<BufferConstraints>,
+
+    frame: Option<Frame>,
+}
+
+pub struct Frame {
+    obj: ExtImageCopyCaptureFrameV1,
+}
+
+impl From<ExtImageCopyCaptureFrameV1> for Frame {
+    fn from(obj: ExtImageCopyCaptureFrameV1) -> Self {
+        Self { obj }
+    }
+}
+
+impl Session {
+    pub fn stop(mut self) {
+        if !self.obj.is_alive() || self.stopped {
+            return;
+        }
+
+        if let Some(frame) = self.frame.take() {
+            frame.fail(FailureReason::Stopped);
+        }
+
+        self.obj.stopped();
+    }
+}
+
+impl CursorSession {
+    pub fn stop(mut self) {
+        if !self.obj.is_alive() || self.stopped {
+            return;
+        }
+
+        if let Some(frame) = self.frame.take() {
+            frame.fail(FailureReason::Stopped);
+        }
+
+        if let Some(capture_session) = self.capture_session.as_ref() {
+            capture_session.stopped();
+        }
+    }
+}
+
+impl Frame {
+    pub fn fail(self, reason: FailureReason) {
+        if !self.obj.is_alive() {
+            return;
+        }
+
+        self.obj.failed(reason);
     }
 }
 
@@ -104,24 +207,17 @@ impl<D>
     GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ImageCaptureSourceGlobalData, D>
     for ImageCopyCaptureState
 where
-    D: ImageCopyCaptureHandler
-        + Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, (), D>
-        + ForeignToplevelHandler,
+    D: Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ()>,
 {
     fn bind(
-        state: &mut D,
+        _state: &mut D,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtForeignToplevelImageCaptureSourceManagerV1>,
         _global_data: &ImageCaptureSourceGlobalData,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ());
-
-        state
-            .image_capture_state()
-            .foreign_toplevel_source_managers
-            .insert(manager);
+        data_init.init(resource, ());
     }
 
     fn can_view(client: Client, global_data: &ImageCaptureSourceGlobalData) -> bool {
@@ -131,15 +227,13 @@ where
 
 impl<D> Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, (), D> for ImageCopyCaptureState
 where
-    D: ImageCopyCaptureHandler,
     D: ForeignToplevelHandler,
-    D: Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, (), D>,
     D: Dispatch<ExtImageCaptureSourceV1, ImageCaptureSource>,
 {
     fn request(
         state: &mut D,
         _client: &Client,
-        resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
+        _resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
         request: <ExtForeignToplevelImageCaptureSourceManagerV1 as smithay::reexports::wayland_server::Resource>::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
@@ -162,12 +256,7 @@ where
                     },
                 );
             }
-            ext_foreign_toplevel_image_capture_source_manager_v1::Request::Destroy => {
-                state
-                    .image_capture_state()
-                    .foreign_toplevel_source_managers
-                    .remove(resource);
-            }
+            ext_foreign_toplevel_image_capture_source_manager_v1::Request::Destroy => {}
             _ => unreachable!(),
         }
     }
@@ -184,22 +273,17 @@ where
 impl<D> GlobalDispatch<ExtOutputImageCaptureSourceManagerV1, ImageCaptureSourceGlobalData, D>
     for ImageCopyCaptureState
 where
-    D: ImageCopyCaptureHandler + Dispatch<ExtOutputImageCaptureSourceManagerV1, (), D>,
+    D: Dispatch<ExtOutputImageCaptureSourceManagerV1, ()>,
 {
     fn bind(
-        state: &mut D,
+        _state: &mut D,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtOutputImageCaptureSourceManagerV1>,
         _global_data: &ImageCaptureSourceGlobalData,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ());
-
-        state
-            .image_capture_state()
-            .output_source_managers
-            .insert(manager);
+        data_init.init(resource, ());
     }
 
     fn can_view(client: Client, global_data: &ImageCaptureSourceGlobalData) -> bool {
@@ -209,14 +293,12 @@ where
 
 impl<D> Dispatch<ExtOutputImageCaptureSourceManagerV1, (), D> for ImageCopyCaptureState
 where
-    D: ImageCopyCaptureHandler,
-    D: Dispatch<ExtOutputImageCaptureSourceManagerV1, (), D>,
     D: Dispatch<ExtImageCaptureSourceV1, ImageCaptureSource>,
 {
     fn request(
-        state: &mut D,
+        _state: &mut D,
         _client: &Client,
-        resource: &ExtOutputImageCaptureSourceManagerV1,
+        _resource: &ExtOutputImageCaptureSourceManagerV1,
         request: <ExtOutputImageCaptureSourceManagerV1 as smithay::reexports::wayland_server::Resource>::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
@@ -236,13 +318,8 @@ where
                     },
                 );
             }
-            ext_output_image_capture_source_manager_v1::Request::Destroy => {
-                state
-                    .image_capture_state()
-                    .output_source_managers
-                    .remove(resource);
-            }
-            _ => todo!(),
+            ext_output_image_capture_source_manager_v1::Request::Destroy => {}
+            _ => unreachable!(),
         }
     }
 
@@ -257,23 +334,17 @@ where
 
 impl<D> GlobalDispatch<ExtImageCopyCaptureManagerV1, (), D> for ImageCopyCaptureState
 where
-    D: ImageCopyCaptureHandler,
-    D: Dispatch<ExtImageCopyCaptureManagerV1, (), D>,
+    D: Dispatch<ExtImageCopyCaptureManagerV1, ()>,
 {
     fn bind(
-        state: &mut D,
+        _state: &mut D,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtImageCopyCaptureManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ());
-
-        state
-            .image_capture_state()
-            .image_copy_capture_managers
-            .insert(manager);
+        data_init.init(resource, ());
     }
 }
 
@@ -296,7 +367,9 @@ where
                 source,
                 options,
             } => {
-                todo!();
+                if let Some(source) = source.data::<ImageCaptureSource>() {
+                    if let Some(constraints) = state.capture_source(source) {}
+                }
             }
             ext_image_copy_capture_manager_v1::Request::CreatePointerCursorSession {
                 session,
@@ -313,10 +386,16 @@ where
     }
 }
 
-pub struct ImageCopyCaptureSessionData;
+pub struct ImageCopyCaptureSessionData {
+    stopped: AtomicBool,
+}
 
 impl<D> Dispatch<ExtImageCopyCaptureSessionV1, ImageCopyCaptureSessionData, D>
     for ImageCopyCaptureState
+where
+    D: ImageCopyCaptureHandler,
+    D: Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureInertFrame>,
+    D: Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureNormalFrame>,
 {
     fn request(
         state: &mut D,
@@ -329,57 +408,98 @@ impl<D> Dispatch<ExtImageCopyCaptureSessionV1, ImageCopyCaptureSessionData, D>
     ) {
         match request {
             ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
-                todo!();
+                if let Some(session) = state
+                    .image_capture_state()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| &session.obj == resource)
+                {
+                    if session.frame.is_some() {
+                        data_init.init(frame, ImageCopyCaptureInertFrame);
+                        resource.post_error(
+                            ext_image_copy_capture_session_v1::Error::DuplicateFrame,
+                            "create_frame sent before destroying the previous frame",
+                        );
+                        return;
+                    }
+
+                    let frame = data_init.init(frame, ImageCopyCaptureNormalFrame);
+
+                    session.frame = Some(Frame::from(frame));
+                } else {
+                    let frame = data_init.init(frame, ImageCopyCaptureInertFrame);
+                    frame.failed(FailureReason::Stopped);
+                }
             }
-            ext_image_copy_capture_session_v1::Request::Destroy => {
-                todo!();
-            }
+            ext_image_copy_capture_session_v1::Request::Destroy => {}
             _ => unreachable!(),
         }
     }
-}
 
-pub struct ImageCopyCaptureFrameData;
-
-impl<D> Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureFrameData, D>
-    for ImageCopyCaptureState
-{
-    fn request(
+    fn destroyed(
         state: &mut D,
-        client: &Client,
-        resource: &ExtImageCopyCaptureFrameV1,
-        request: <ExtImageCopyCaptureFrameV1 as smithay::reexports::wayland_server::Resource>::Request,
-        data: &ImageCopyCaptureFrameData,
-        dhandle: &DisplayHandle,
-        data_init: &mut DataInit<'_, D>,
+        _client: wayland_backend::server::ClientId,
+        resource: &ExtImageCopyCaptureSessionV1,
+        _data: &ImageCopyCaptureSessionData,
     ) {
-        match request {
-            ext_image_copy_capture_frame_v1::Request::Destroy => {
-                todo!();
-            }
-            ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
-                todo!();
-            }
-            ext_image_copy_capture_frame_v1::Request::DamageBuffer {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                todo!();
-            }
-            ext_image_copy_capture_frame_v1::Request::Capture => {
-                todo!();
-            }
-            _ => unreachable!(),
+        if let Some(pos) = state
+            .image_capture_state()
+            .sessions
+            .iter()
+            .position(|session| &session.obj == resource)
+        {
+            let session = state.image_capture_state().sessions.remove(pos);
+            state.session_destroyed(session);
         }
     }
 }
 
 pub struct ImageCopyCaptureCursorSessionData;
 
+impl<D> Dispatch<ExtImageCopyCaptureSessionV1, ImageCopyCaptureCursorSessionData, D>
+    for ImageCopyCaptureState
+where
+    D: ImageCopyCaptureHandler,
+{
+    fn request(
+        state: &mut D,
+        client: &Client,
+        resource: &ExtImageCopyCaptureSessionV1,
+        request: <ExtImageCopyCaptureSessionV1 as Resource>::Request,
+        _: &ImageCopyCaptureCursorSessionData,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
+                if let Some(cursor_session) = state
+                    .image_capture_state()
+                    .cursor_sessions
+                    .iter_mut()
+                    .find(|session| session.capture_session.as_ref() == Some(resource))
+                {
+                }
+            }
+            ext_image_copy_capture_session_v1::Request::Destroy => {
+                if let Some(cursor_session) = state
+                    .image_capture_state()
+                    .cursor_sessions
+                    .iter_mut()
+                    .find(|session| session.capture_session.as_ref() == Some(resource))
+                {
+                    cursor_session.capture_session.take();
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl<D> Dispatch<ExtImageCopyCaptureCursorSessionV1, ImageCopyCaptureCursorSessionData, D>
     for ImageCopyCaptureState
+where
+    D: ImageCopyCaptureHandler,
+    D: Dispatch<ExtImageCopyCaptureSessionV1, ImageCopyCaptureCursorSessionData>,
 {
     fn request(
         state: &mut D,
@@ -390,12 +510,136 @@ impl<D> Dispatch<ExtImageCopyCaptureCursorSessionV1, ImageCopyCaptureCursorSessi
         dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, D>,
     ) {
+        let Some(cursor_session) = state
+            .image_capture_state()
+            .cursor_sessions
+            .iter_mut()
+            .find(|session| &session.obj == resource)
+        else {
+            return;
+        };
+
         match request {
-            ext_image_copy_capture_cursor_session_v1::Request::Destroy => {
-                todo!();
-            }
+            ext_image_copy_capture_cursor_session_v1::Request::Destroy => {}
             ext_image_copy_capture_cursor_session_v1::Request::GetCaptureSession { session } => {
-                todo!();
+                if cursor_session.capture_session.is_none() {
+                    cursor_session.capture_session =
+                        Some(data_init.init(session, ImageCopyCaptureCursorSessionData));
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn destroyed(
+        state: &mut D,
+        _client: wayland_backend::server::ClientId,
+        resource: &ExtImageCopyCaptureCursorSessionV1,
+        _data: &ImageCopyCaptureCursorSessionData,
+    ) {
+        if let Some(idx) = state
+            .image_capture_state()
+            .cursor_sessions
+            .iter()
+            .position(|session| &session.obj == resource)
+        {
+            let session = state.image_capture_state().cursor_sessions.remove(idx);
+            state.cursor_session_destroyed(session);
+        }
+    }
+}
+
+pub struct ImageCopyCaptureInertFrame;
+pub struct ImageCopyCaptureNormalFrame;
+pub struct ImageCopyCaptureCursorFrame;
+
+impl<D> Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureInertFrame, D>
+    for ImageCopyCaptureState
+{
+    fn request(
+        state: &mut D,
+        client: &Client,
+        resource: &ExtImageCopyCaptureFrameV1,
+        request: <ExtImageCopyCaptureFrameV1 as smithay::reexports::wayland_server::Resource>::Request,
+        data: &ImageCopyCaptureInertFrame,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            ext_image_copy_capture_frame_v1::Request::Destroy => {}
+            ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
+                trace!("Client attached a buffer to an inert frame. Ignoring.")
+            }
+            ext_image_copy_capture_frame_v1::Request::DamageBuffer {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                trace!("Client requested damage to an inert frame. Ignoring.")
+            }
+            ext_image_copy_capture_frame_v1::Request::Capture => {
+                trace!("Client requested to capture an inert frame. Ignoring.")
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<D> Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureNormalFrame, D>
+    for ImageCopyCaptureState
+{
+    fn request(
+        state: &mut D,
+        client: &Client,
+        resource: &ExtImageCopyCaptureFrameV1,
+        request: <ExtImageCopyCaptureFrameV1 as smithay::reexports::wayland_server::Resource>::Request,
+        data: &ImageCopyCaptureNormalFrame,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            ext_image_copy_capture_frame_v1::Request::Destroy => todo!(),
+            ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => todo!(),
+            ext_image_copy_capture_frame_v1::Request::DamageBuffer {
+                x,
+                y,
+                width,
+                height,
+            } => todo!(),
+            ext_image_copy_capture_frame_v1::Request::Capture => todo!(),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<D> Dispatch<ExtImageCopyCaptureFrameV1, ImageCopyCaptureCursorFrame, D>
+    for ImageCopyCaptureState
+{
+    fn request(
+        state: &mut D,
+        client: &Client,
+        resource: &ExtImageCopyCaptureFrameV1,
+        request: <ExtImageCopyCaptureFrameV1 as smithay::reexports::wayland_server::Resource>::Request,
+        data: &ImageCopyCaptureCursorFrame,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, D>,
+    ) {
+        match request {
+            ext_image_copy_capture_frame_v1::Request::Destroy => {}
+            ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
+                trace!("Client attached a buffer to a cursor frame. Ignoring.")
+            }
+            ext_image_copy_capture_frame_v1::Request::DamageBuffer {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                trace!("Client requested damage to a cursor frame. Ignoring.")
+            }
+            ext_image_copy_capture_frame_v1::Request::Capture => {
+                trace!("Client requested to capture a cursor frame. Ignoring.")
             }
             _ => unreachable!(),
         }
@@ -448,10 +692,22 @@ macro_rules! delegate_image_copy_capture {
             smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1: $crate::protocols::image_copy_capture::ImageCopyCaptureSessionData
         ] => $crate::protocols::image_copy_capture::ImageCopyCaptureState);
 
+        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1: $crate::protocols::image_copy_capture::ImageCopyCaptureCursorSessionData
+        ] => $crate::protocols::image_copy_capture::ImageCopyCaptureState);
+
         // ext_image_copy_capture_frame_v1
 
         smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1: $crate::protocols::image_copy_capture::ImageCopyCaptureFrameData
+            smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1: $crate::protocols::image_copy_capture::ImageCopyCaptureInertFrame
+        ] => $crate::protocols::image_copy_capture::ImageCopyCaptureState);
+
+        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1: $crate::protocols::image_copy_capture::ImageCopyCaptureNormalFrame
+        ] => $crate::protocols::image_copy_capture::ImageCopyCaptureState);
+
+        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
+            smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1: $crate::protocols::image_copy_capture::ImageCopyCaptureCursorFrame
         ] => $crate::protocols::image_copy_capture::ImageCopyCaptureState);
 
         // ext_image_copy_capture_cursor_session_v1
