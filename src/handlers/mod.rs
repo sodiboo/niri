@@ -11,11 +11,16 @@ use std::thread;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, PointerHandle};
 use smithay::input::{keyboard, Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::rustix::fs::{fcntl_setfl, OFlags};
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource;
@@ -474,22 +479,49 @@ impl ImageCopyCaptureHandler for State {
         todo!()
     }
 
-    fn new_session(&mut self, session: image_copy_capture::Session) {
+    fn new_session(&mut self, session: ExtImageCopyCaptureSessionV1) {
         todo!()
     }
 
-    fn new_cursor_session(&mut self, session: image_copy_capture::CursorSession) {
+    fn new_cursor_session(&mut self, session: ExtImageCopyCaptureCursorSessionV1) {
         todo!()
     }
 
-    fn frame(&mut self, session: image_copy_capture::Session, frame: image_copy_capture::Frame) {
-        todo!()
-    }
-
-    fn cursor_frame(
+    fn frame_requested(
         &mut self,
-        session: image_copy_capture::CursorSession,
-        frame: image_copy_capture::Frame,
+        session: ExtImageCopyCaptureSessionV1,
+        frame: ExtImageCopyCaptureFrameV1,
+    ) {
+        let Some(session) = self.image_capture_state().get_session_mut(&session) else {
+            error!("image capture session destroyed already; unreachable");
+            return;
+        };
+
+        match session.source() {
+            ImageCaptureSource::Invalid => {
+                session.with_frame(|frame| frame.fail(FailureReason::Stopped));
+            }
+            ImageCaptureSource::Output(output) => {
+                let Some(output) = output.upgrade() else {
+                    session.with_frame(|frame| frame.fail(FailureReason::Stopped));
+                    return;
+                };
+
+                let damage_tracker = session.damage_tracker.get_or_insert_with(|| {
+                    self.niri.queue_redraw(&output);
+                    OutputDamageTracker::from_output(&output)
+                });
+            }
+            ImageCaptureSource::Toplevel(mapped_id) => {
+                todo!("capture toplevel is unimplemented");
+            }
+        }
+    }
+
+    fn cursor_frame_requested(
+        &mut self,
+        session: ExtImageCopyCaptureCursorSessionV1,
+        frame: ExtImageCopyCaptureFrameV1,
     ) {
         todo!()
     }

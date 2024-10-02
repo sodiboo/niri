@@ -52,6 +52,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{
     Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
 };
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1;
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::WmCapabilities;
 use smithay::reexports::wayland_protocols_misc::server_decoration as _server_decoration;
@@ -313,6 +314,9 @@ pub struct Niri {
     // Casts are dropped before PipeWire to prevent a double-free (yay).
     pub casts: Vec<Cast>,
     pub pipewire: Option<PipeWire>,
+
+    pub image_copy_capture_output_frames: Vec<(Window, ExtImageCopyCaptureFrameV1)>,
+    pub image_copy_capture_toplevel_frames: Vec<(Window, ExtImageCopyCaptureFrameV1)>,
 
     // Screencast output for each mapped window.
     #[cfg(feature = "xdp-gnome-screencast")]
@@ -1941,6 +1945,9 @@ impl Niri {
 
             pipewire,
             casts: vec![],
+
+            image_copy_capture_output_frames: vec![],
+            image_copy_capture_toplevel_frames: vec![],
 
             #[cfg(feature = "xdp-gnome-screencast")]
             mapped_cast_output: HashMap::new(),
