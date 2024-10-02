@@ -157,7 +157,16 @@ impl PointerConstraintsHandler for State {
         if is_constraint_active {
             if let Some((ref focused_surface, origin)) = self.niri.pointer_focus.surface {
                 if focused_surface == surface {
-                    pointer.set_location(origin + location);
+                    let target = self
+                        .niri
+                        .output_for_root(surface)
+                        .and_then(|output| self.niri.global_space.output_geometry(output))
+                        .map_or(origin + location, |mut output_geometry| {
+                            // i32 sizes are exclusive, but f64 sizes are inclusive.
+                            output_geometry.size -= (1, 1).into();
+                            (origin + location).constrain(output_geometry.to_f64())
+                        });
+                    pointer.set_location(target);
                 } else {
                     error!("cursor_position_hint called on a surface that is not the focused surface, but the constraint is active. this should be impossible.");
                 }
