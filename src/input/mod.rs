@@ -11,7 +11,7 @@ use niri_ipc::LayoutSwitchTarget;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
-    InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton, PointerAxisEvent,
+    InputBackend, InputEvent, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
     PointerButtonEvent, PointerMotionEvent, ProximityState, TabletToolButtonEvent, TabletToolEvent,
     TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState, TouchEvent, UnusedEvent,
 };
@@ -1110,6 +1110,16 @@ impl State {
             Action::SwitchPresetColumnWidth => {
                 self.niri.layout.toggle_width();
             }
+            Action::SwitchPresetWindowHeight => {
+                self.niri.layout.toggle_window_height(None);
+            }
+            Action::SwitchPresetWindowHeightById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.niri.layout.toggle_window_height(Some(&window));
+                }
+            }
             Action::CenterColumn => {
                 self.niri.layout.center_column();
                 // FIXME: granular
@@ -1962,7 +1972,8 @@ impl State {
         let under = self.niri.surface_under_and_global_space(pos);
 
         let tablet_seat = self.niri.seat.tablet_seat();
-        let tool = tablet_seat.add_tool::<Self>(&self.niri.display_handle, &event.tool());
+        let display_handle = self.niri.display_handle.clone();
+        let tool = tablet_seat.add_tool::<Self>(self, &display_handle, &event.tool());
         let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
         if let Some(tablet) = tablet {
             match event.state() {
@@ -2369,10 +2380,10 @@ impl State {
 /// to them from being delivered.
 #[allow(clippy::too_many_arguments)]
 fn should_intercept_key(
-    suppressed_keys: &mut HashSet<u32>,
+    suppressed_keys: &mut HashSet<Keycode>,
     bindings: &Binds,
     comp_mod: CompositorMod,
-    key_code: u32,
+    key_code: Keycode,
     modified: Keysym,
     raw: Option<Keysym>,
     pressed: bool,
@@ -2818,8 +2829,8 @@ mod tests {
         // The key_code we pick is arbitrary, the only thing
         // that matters is that they are different between cases.
 
-        let close_key_code = close_keysym.into();
-        let close_key_event = |suppr: &mut HashSet<u32>, mods: ModifiersState, pressed| {
+        let close_key_code = Keycode::from(close_keysym.raw() + 8u32);
+        let close_key_event = |suppr: &mut HashSet<Keycode>, mods: ModifiersState, pressed| {
             should_intercept_key(
                 suppr,
                 &bindings,
@@ -2835,12 +2846,12 @@ mod tests {
         };
 
         // Key event with the code which can't trigger any action.
-        let none_key_event = |suppr: &mut HashSet<u32>, mods: ModifiersState, pressed| {
+        let none_key_event = |suppr: &mut HashSet<Keycode>, mods: ModifiersState, pressed| {
             should_intercept_key(
                 suppr,
                 &bindings,
                 comp_mod,
-                Keysym::l.into(),
+                Keycode::from(Keysym::l.raw() + 8),
                 Keysym::l,
                 Some(Keysym::l),
                 pressed,

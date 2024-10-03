@@ -113,6 +113,9 @@ layout {
         // fixed 1920
     }
 
+    // You can also customize the heights that "switch-preset-window-height" (Mod+Shift+R) toggles between.
+    // preset-window-heights { }
+
     // You can change the default width of the new windows.
     default-column-width { proportion 0.5; }
     // If you leave the brackets empty, the windows themselves will decide their initial width.
@@ -199,7 +202,9 @@ layout {
 
 // Uncomment this line to ask the clients to omit their client-side decorations if possible.
 // If the client will specifically ask for CSD, the request will be honored.
-// Additionally, clients will be informed that they are tiled, removing some rounded corners.
+// Additionally, clients will be informed that they are tiled, removing some client-side rounded corners.
+// This option will also fix border/focus ring drawing behind some semitransparent windows.
+// After enabling or disabling this, you need to restart the apps for this to take effect.
 // prefer-no-csd
 
 // You can change the path where screenshots are saved.
@@ -245,6 +250,13 @@ window-rule {
 
     // Use this instead if you want them visible on third-party screenshot tools.
     // block-out-from "screencast"
+}
+
+// Example: enable rounded corners for all windows.
+// (This example rule is commented out with a "/-" in front.)
+/-window-rule {
+    geometry-corner-radius 12
+    clip-to-geometry true
 }
 
 binds {
@@ -419,15 +431,18 @@ binds {
     // Switches focus between the current and the previous workspace.
     // Mod+Tab { focus-workspace-previous; }
 
+    // Consume one window from the right into the focused column.
     Mod+Comma  { consume-window-into-column; }
+    // Expel one window from the focused column to the right.
     Mod+Period { expel-window-from-column; }
 
     // There are also commands that consume or expel a single window to the side.
-    // Mod+BracketLeft  { consume-or-expel-window-left; }
-    // Mod+BracketRight { consume-or-expel-window-right; }
+    Mod+BracketLeft  { consume-or-expel-window-left; }
+    Mod+BracketRight { consume-or-expel-window-right; }
 
     Mod+R { switch-preset-column-width; }
-    Mod+Shift+R { reset-window-height; }
+    Mod+Shift+R { switch-preset-window-height; }
+    Mod+Ctrl+R { reset-window-height; }
     Mod+F { maximize-column; }
     Mod+Shift+F { fullscreen-window; }
     Mod+C { center-column; }

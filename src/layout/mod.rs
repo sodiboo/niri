@@ -34,7 +34,9 @@ use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
 
-use niri_config::{CenterFocusedColumn, Config, FloatOrInt, Struts, Workspace as WorkspaceConfig};
+use niri_config::{
+    CenterFocusedColumn, Config, FloatOrInt, PresetSize, Struts, Workspace as WorkspaceConfig,
+};
 use niri_ipc::SizeChange;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::Id;
@@ -187,6 +189,9 @@ pub trait LayoutElement {
     /// This *will* switch immediately after a [`LayoutElement::request_fullscreen()`] call.
     fn is_pending_fullscreen(&self) -> bool;
 
+    /// Size previously requested through [`LayoutElement::request_size()`].
+    fn requested_size(&self) -> Option<Size<i32, Logical>>;
+
     fn rules(&self) -> &ResolvedWindowRules;
 
     /// Runs periodic clean-up tasks.
@@ -238,11 +243,12 @@ pub struct Options {
     pub center_focused_column: CenterFocusedColumn,
     pub always_center_single_column: bool,
     /// Column widths that `toggle_width()` switches between.
-    pub preset_widths: Vec<ColumnWidth>,
+    pub preset_column_widths: Vec<ColumnWidth>,
     /// Initial width for new columns.
-    pub default_width: Option<ColumnWidth>,
+    pub default_column_width: Option<ColumnWidth>,
+    /// Window height that `toggle_window_height()` switches between.
+    pub preset_window_heights: Vec<PresetSize>,
     pub animations: niri_config::Animations,
-
     // Debug flags.
     pub disable_resize_throttling: bool,
     pub disable_transactions: bool,
@@ -257,15 +263,20 @@ impl Default for Options {
             border: Default::default(),
             center_focused_column: Default::default(),
             always_center_single_column: false,
-            preset_widths: vec![
+            preset_column_widths: vec![
                 ColumnWidth::Proportion(1. / 3.),
                 ColumnWidth::Proportion(0.5),
                 ColumnWidth::Proportion(2. / 3.),
             ],
-            default_width: None,
+            default_column_width: None,
             animations: Default::default(),
             disable_resize_throttling: false,
             disable_transactions: false,
+            preset_window_heights: vec![
+                PresetSize::Proportion(1. / 3.),
+                PresetSize::Proportion(0.5),
+                PresetSize::Proportion(2. / 3.),
+            ],
         }
     }
 }
@@ -273,21 +284,26 @@ impl Default for Options {
 impl Options {
     fn from_config(config: &Config) -> Self {
         let layout = &config.layout;
-        let preset_column_widths = &layout.preset_column_widths;
 
-        let preset_widths = if preset_column_widths.is_empty() {
-            Options::default().preset_widths
+        let preset_column_widths = if layout.preset_column_widths.is_empty() {
+            Options::default().preset_column_widths
         } else {
-            preset_column_widths
+            layout
+                .preset_column_widths
                 .iter()
                 .copied()
                 .map(ColumnWidth::from)
                 .collect()
         };
+        let preset_window_heights = if layout.preset_window_heights.is_empty() {
+            Options::default().preset_window_heights
+        } else {
+            layout.preset_window_heights.clone()
+        };
 
         // Missing default_column_width maps to Some(ColumnWidth::Proportion(0.5)),
         // while present, but empty, maps to None.
-        let default_width = layout
+        let default_column_width = layout
             .default_column_width
             .as_ref()
             .map(|w| w.0.map(ColumnWidth::from))
@@ -300,11 +316,12 @@ impl Options {
             border: layout.border,
             center_focused_column: layout.center_focused_column,
             always_center_single_column: layout.always_center_single_column,
-            preset_widths,
-            default_width,
+            preset_column_widths,
+            default_column_width,
             animations: config.animations.clone(),
             disable_resize_throttling: config.debug.disable_resize_throttling,
             disable_transactions: config.debug.disable_transactions,
+            preset_window_heights,
         }
     }
 
@@ -1015,6 +1032,35 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         0.
+    }
+
+    pub fn should_trigger_focus_follows_mouse_on(&self, window: &W::Id) -> bool {
+        // During an animation, it's easy to trigger focus-follows-mouse on the previous workspace,
+        // especially when clicking to switch workspace on a bar of some kind. This cancels the
+        // workspace switch, which is annoying and not intended.
+        //
+        // This function allows focus-follows-mouse to trigger only on the animation target
+        // workspace.
+        let MonitorSet::Normal { monitors, .. } = &self.monitor_set else {
+            return true;
+        };
+
+        let (mon, ws_idx) = monitors
+            .iter()
+            .find_map(|mon| {
+                mon.workspaces
+                    .iter()
+                    .position(|ws| ws.has_window(window))
+                    .map(|ws_idx| (mon, ws_idx))
+            })
+            .unwrap();
+
+        // During a gesture, focus-follows-mouse does not cause any unintended workspace switches.
+        if let Some(WorkspaceSwitch::Gesture(_)) = mon.workspace_switch {
+            return true;
+        }
+
+        ws_idx == mon.active_workspace_idx
     }
 
     pub fn activate_window(&mut self, window: &W::Id) {
@@ -1937,6 +1983,23 @@ impl<W: LayoutElement> Layout<W> {
         monitor.toggle_width();
     }
 
+    pub fn toggle_window_height(&mut self, window: Option<&W::Id>) {
+        let workspace = if let Some(window) = window {
+            Some(
+                self.workspaces_mut()
+                    .find(|ws| ws.has_window(window))
+                    .unwrap(),
+            )
+        } else {
+            self.active_workspace_mut()
+        };
+
+        let Some(workspace) = workspace else {
+            return;
+        };
+        workspace.toggle_window_height(window);
+    }
+
     pub fn toggle_full_width(&mut self) {
         let Some(monitor) = self.active_monitor() else {
             return;
@@ -2717,7 +2780,7 @@ mod tests {
         }
 
         fn communicate(&self) -> bool {
-            if let Some(size) = self.0.requested_size.take() {
+            if let Some(size) = self.0.requested_size.get() {
                 assert!(size.w >= 0);
                 assert!(size.h >= 0);
 
@@ -2825,6 +2888,10 @@ mod tests {
 
         fn is_pending_fullscreen(&self) -> bool {
             self.0.pending_fullscreen.get()
+        }
+
+        fn requested_size(&self) -> Option<Size<i32, Logical>> {
+            self.0.requested_size.get()
         }
 
         fn refresh(&self) {}
@@ -3027,6 +3094,10 @@ mod tests {
         },
         MoveColumnToOutput(#[proptest(strategy = "1..=5u8")] u8),
         SwitchPresetColumnWidth,
+        SwitchPresetWindowHeight {
+            #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+            id: Option<usize>,
+        },
         MaximizeColumn,
         SetColumnWidth(#[proptest(strategy = "arbitrary_size_change()")] SizeChange),
         SetWindowHeight {
@@ -3453,6 +3524,10 @@ mod tests {
                 Op::MoveWorkspaceDown => layout.move_workspace_down(),
                 Op::MoveWorkspaceUp => layout.move_workspace_up(),
                 Op::SwitchPresetColumnWidth => layout.toggle_width(),
+                Op::SwitchPresetWindowHeight { id } => {
+                    let id = id.filter(|id| layout.has_window(id));
+                    layout.toggle_window_height(id.as_ref());
+                }
                 Op::MaximizeColumn => layout.toggle_full_width(),
                 Op::SetColumnWidth(change) => layout.set_column_width(change),
                 Op::SetWindowHeight { id, change } => {
@@ -4416,6 +4491,41 @@ mod tests {
     }
 
     #[test]
+    fn preset_height_change_removes_preset() {
+        let mut config = Config::default();
+        config.layout.preset_window_heights = vec![PresetSize::Fixed(1), PresetSize::Fixed(2)];
+
+        let mut layout = Layout::new(&config);
+
+        let ops = [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                id: 1,
+                bbox: Rectangle::from_loc_and_size((0, 0), (1280, 200)),
+                min_max_size: Default::default(),
+            },
+            Op::AddWindow {
+                id: 2,
+                bbox: Rectangle::from_loc_and_size((0, 0), (1280, 200)),
+                min_max_size: Default::default(),
+            },
+            Op::ConsumeOrExpelWindowLeft,
+            Op::SwitchPresetWindowHeight { id: None },
+            Op::SwitchPresetWindowHeight { id: None },
+        ];
+        for op in ops {
+            op.apply(&mut layout);
+        }
+
+        // Leave only one.
+        config.layout.preset_window_heights = vec![PresetSize::Fixed(1)];
+
+        layout.update_config(&config);
+
+        layout.verify_invariants();
+    }
+
+    #[test]
     fn working_area_starts_at_physical_pixel() {
         let struts = Struts {
             left: FloatOrInt(0.5),
@@ -4591,6 +4701,39 @@ mod tests {
         ];
 
         check_ops(&ops);
+    }
+
+    #[test]
+    fn fixed_height_takes_max_non_auto_into_account() {
+        let ops = [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                id: 0,
+                bbox: Rectangle::from_loc_and_size((0, 0), (100, 200)),
+                min_max_size: Default::default(),
+            },
+            Op::SetWindowHeight {
+                id: Some(0),
+                change: SizeChange::SetFixed(704),
+            },
+            Op::AddWindow {
+                id: 1,
+                bbox: Rectangle::from_loc_and_size((0, 0), (100, 200)),
+                min_max_size: Default::default(),
+            },
+            Op::ConsumeOrExpelWindowLeft,
+        ];
+
+        let options = Options {
+            border: niri_config::Border {
+                off: false,
+                width: niri_config::FloatOrInt(4.),
+                ..Default::default()
+            },
+            gaps: 0.,
+            ..Default::default()
+        };
+        check_ops_with_options(options, &ops);
     }
 
     fn arbitrary_spacing() -> impl Strategy<Value = f64> {
