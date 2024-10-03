@@ -104,7 +104,7 @@ impl ProcessSpecialEvent<WaylandInputBackend> for State {
                 let keyboard = self.niri.seat.get_keyboard().unwrap();
                 // Prevent any repeats from happening when we don't have keyboard focus.
                 for keycode in keyboard.pressed_keys() {
-                    keyboard.input_intercept(self, keycode.raw(), KeyState::Released, |_, _, _| ());
+                    keyboard.input_intercept(self, keycode, KeyState::Released, |_, _, _| ());
                 }
 
                 self.niri.compositor_has_keyboard_focus = false;

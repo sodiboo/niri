@@ -3,7 +3,7 @@ use std::os::fd::OwnedFd;
 
 use smithay::backend::input::{
     Axis, AxisRelativeDirection, AxisSource, ButtonState, Device, DeviceCapability, InputBackend,
-    KeyState, TouchSlot, UnusedEvent,
+    KeyState, Keycode, TouchSlot, UnusedEvent,
 };
 use smithay::utils::{Physical, Size};
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard;
@@ -173,12 +173,12 @@ event!(
         pub keyboard: WlKeyboard,
         pub time: u32,
         pub serial: u32,
-        pub key: u32,
+        pub key: Keycode,
         pub state: KeyState,
     }
 
     impl KeyboardKeyEvent {
-        fn key_code(&self) -> u32 {
+        fn key_code(&self) -> Keycode {
             self.key
         }
 
@@ -430,7 +430,7 @@ pub enum WaylandInputSpecialEvent {
     KeyboardEnter {
         keyboard: WlKeyboard,
         serial: u32,
-        keys: HashSet<u32>,
+        keys: HashSet<Keycode>,
     },
     KeyboardLeave {
         keyboard: WlKeyboard,

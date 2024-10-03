@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use smithay::backend::input;
+use smithay::backend::input::{self, Keycode};
 use smithay::backend::input::{ButtonState, InputEvent};
 use smithay_client_toolkit::reexports::client::globals::GlobalList;
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::{self, WlKeyboard};
@@ -323,18 +323,20 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                 keys,
             } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
-                // Keysyms are encoded as an array of u32
-                let raw = keys
-                    .chunks_exact(4)
-                    .flat_map(TryInto::<[u8; 4]>::try_into)
-                    .map(u32::from_le_bytes)
-                    .collect::<Vec<_>>();
 
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardEnter {
                         keyboard,
                         serial,
-                        keys: raw.into_iter().collect(),
+                        keys: keys
+                            // Keysyms are encoded as an array of u32
+                            .chunks_exact(4)
+                            .flat_map(TryInto::<[u8; 4]>::try_into)
+                            .map(u32::from_le_bytes)
+                            // We must add 8 to the keycode for any functions we pass the raw
+                            // keycode into per wl_keyboard protocol
+                            .map(|raw| Keycode::new(raw + 8))
+                            .collect(),
                     },
                 ));
             }
@@ -360,7 +362,7 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                         keyboard,
                         serial,
                         time,
-                        key,
+                        key: Keycode::new(key + 8),
                         state,
                     },
                 });
