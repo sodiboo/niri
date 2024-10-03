@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use smithay::backend::input;
+use smithay::backend::input::{self, Keycode};
 use smithay::backend::input::{ButtonState, InputEvent};
 use smithay_client_toolkit::reexports::client::globals::GlobalList;
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::{self, WlKeyboard};
@@ -323,18 +323,20 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                 keys,
             } => {
                 assert_eq!(&surface, backend.graphics.window().wl_surface());
-                // Keysyms are encoded as an array of u32
-                let raw = keys
-                    .chunks_exact(4)
-                    .flat_map(TryInto::<[u8; 4]>::try_into)
-                    .map(u32::from_le_bytes)
-                    .collect::<Vec<_>>();
 
                 backend.send_input_event(InputEvent::Special(
                     WaylandInputSpecialEvent::KeyboardEnter {
                         keyboard,
                         serial,
-                        keys: raw.into_iter().collect(),
+                        keys: keys
+                            // Keysyms are encoded as an array of u32
+                            .chunks_exact(4)
+                            .flat_map(TryInto::<[u8; 4]>::try_into)
+                            .map(u32::from_le_bytes)
+                            // We must add 8 to the keycode for any functions we pass the raw
+                            // keycode into per wl_keyboard protocol
+                            .map(|raw| Keycode::new(raw + 8))
+                            .collect(),
                     },
                 ));
             }
@@ -360,7 +362,7 @@ impl Dispatch<WlKeyboard, ()> for WaylandBackend {
                         keyboard,
                         serial,
                         time,
-                        key,
+                        key: Keycode::new(key + 8),
                         state,
                     },
                 });
@@ -427,28 +429,6 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
     ) {
         let pointer = proxy.clone();
 
-        // FIXME: For `PointerEventKind::Enter`, we're supposed to also
-        // use `event.position` to determine the position of the pointer.
-        // In particular, a pointer enter can (and *will*) be sent without a motion event,
-        // so we shouldn't rely on the motion event to refresh the cursor upon entering.
-        //
-        // As it stands, if the cursor enters our surface without moving, we hide the external
-        // cursor but don't show our own cursor. That's not great, as it leads to the cursor
-        // being invisible.
-        //
-        // But it also requires frame-perfect user input to trigger.
-        // In practice, this doesn't cause any issues, because
-        // you'll only experience it if you're looking for it.
-        //
-        // To fix this, `PointerEventKind::Enter` should
-        // emit `InputEvent::PointerMotionAbsolute` but that event requires
-        // a `time` value, which we don't get on `PointerEventKind::Enter`.
-        // And this `time` value is quite important, so it's nontrivial to make one up.
-        // Therefore, there is no easy way to send that event correctly.
-        //
-        // It's also just annoying to modify the below code to send two events,
-        // so that alone is reason enough to not fix this for now.
-
         match event {
             wl_pointer::Event::Enter {
                 serial,
@@ -464,6 +444,8 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                         serial,
                         surface_x,
                         surface_y,
+                        transform: backend.output.current_transform(),
+                        window_size: backend.graphics.window_size(),
                     },
                 ));
             }
@@ -489,6 +471,7 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
                         time,
                         x: surface_x,
                         y: surface_y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                     },
                 });
@@ -627,6 +610,7 @@ impl RelativePointerHandler for WaylandBackend {
             event: WaylandPointerRelativeMotionEvent {
                 pointer: pointer.clone(),
                 relative_motion: event,
+                transform: self.output.current_transform(),
             },
         })
     }
@@ -705,6 +689,7 @@ impl Dispatch<WlTouch, ()> for WaylandBackend {
                         slot: Some(id as u32).into(),
                         x,
                         y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                         serial,
                     },
@@ -728,6 +713,7 @@ impl Dispatch<WlTouch, ()> for WaylandBackend {
                         slot: Some(id as u32).into(),
                         x,
                         y,
+                        transform: backend.output.current_transform(),
                         window_size: backend.graphics.window_size(),
                     },
                 });

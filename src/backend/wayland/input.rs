@@ -3,9 +3,9 @@ use std::os::fd::OwnedFd;
 
 use smithay::backend::input::{
     Axis, AxisRelativeDirection, AxisSource, ButtonState, Device, DeviceCapability, InputBackend,
-    KeyState, TouchSlot, UnusedEvent,
+    KeyState, Keycode, TouchSlot, UnusedEvent,
 };
-use smithay::utils::{Physical, Size};
+use smithay::utils::{Logical, Physical, Point, Size, Transform};
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard;
 use smithay_client_toolkit::reexports::client::protocol::wl_pointer::WlPointer;
 use smithay_client_toolkit::reexports::client::protocol::wl_touch::WlTouch;
@@ -73,6 +73,61 @@ impl Device for WaylandInputDevice {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct RawAbsolutePosition {
+    pos: Point<f64, Physical>,
+    transform: Transform,
+    window_size: Size<i32, Physical>,
+}
+
+impl RawAbsolutePosition {
+    pub fn new(
+        surface_x: f64,
+        surface_y: f64,
+        transform: Transform,
+        window_size: Size<i32, Physical>,
+    ) -> Self {
+        RawAbsolutePosition {
+            pos: (surface_x, surface_y).into(),
+            transform,
+            window_size,
+        }
+    }
+
+    pub fn physical_bounds(mut self) -> Size<f64, Physical> {
+        self.window_size -= (1, 1).into();
+        self.window_size.to_f64()
+    }
+
+    pub fn logical_bounds(self) -> Size<f64, Logical> {
+        self.transform
+            .transform_size(self.window_size.to_f64())
+            .to_logical(1.0)
+    }
+
+    pub fn position(self) -> Point<f64, Logical> {
+        self.transform
+            .transform_point_in(self.pos, &self.physical_bounds())
+            .to_logical(1.0)
+    }
+
+    pub fn x(self) -> f64 {
+        self.position().x
+    }
+
+    pub fn y(self) -> f64 {
+        self.position().y
+    }
+
+    pub fn x_transformed(self, width: i32) -> f64 {
+        self.x() / self.logical_bounds().w * width as f64
+    }
+
+    pub fn y_transformed(self, height: i32) -> f64 {
+        self.y() / self.logical_bounds().h * height as f64
+    }
+}
+
 macro_rules! event {
     (
         pub struct $event:ident {
@@ -84,6 +139,7 @@ macro_rules! event {
             $(#[AbsolutePositionEvent] {
                 pub $x:ident: f64,
                 pub $y:ident: f64,
+                pub $transform:ident: Transform,
                 pub $window_size:ident: Size<i32, Physical>,
             })?
             $(
@@ -105,6 +161,7 @@ macro_rules! event {
             $(
                 pub $x: f64,
                 pub $y: f64,
+                pub $transform: Transform,
                 pub $window_size: Size<i32, Physical>,
             )?
         }
@@ -142,20 +199,20 @@ macro_rules! event {
 
         $(
             impl ::smithay::backend::input::AbsolutePositionEvent<WaylandInputBackend> for $event
-{                 fn x(&self) -> f64 {
-                    self.$x
+{               fn x(&self) -> f64 {
+                    RawAbsolutePosition::new(self.$x, self.$y, self.$transform, self.$window_size).x()
                 }
 
                 fn y(&self) -> f64 {
-                    self.$y
+                    RawAbsolutePosition::new(self.$x, self.$y, self.$transform, self.$window_size).y()
                 }
 
                 fn x_transformed(&self, width: i32) -> f64 {
-                    self.$x * width as f64 / self.$window_size.w as f64
+                    RawAbsolutePosition::new(self.$x, self.$y, self.$transform, self.$window_size).x_transformed(width)
                 }
 
                 fn y_transformed(&self, height: i32) -> f64 {
-                    self.$y * height as f64 / self.$window_size.h as f64
+                    RawAbsolutePosition::new(self.$x, self.$y, self.$transform, self.$window_size).y_transformed(height)
                 }
             }
         )?
@@ -173,12 +230,12 @@ event!(
         pub keyboard: WlKeyboard,
         pub time: u32,
         pub serial: u32,
-        pub key: u32,
+        pub key: Keycode,
         pub state: KeyState,
     }
 
     impl KeyboardKeyEvent {
-        fn key_code(&self) -> u32 {
+        fn key_code(&self) -> Keycode {
             self.key
         }
 
@@ -195,10 +252,29 @@ event!(
     }
 );
 
+fn transform_delta(transform: Transform, (dx, dy): (f64, f64)) -> (f64, f64) {
+    let transform = match transform {
+        Transform::Flipped90 => Transform::Flipped270,
+        Transform::Flipped270 => Transform::Flipped90,
+        other => other,
+    };
+    match transform {
+        Transform::Normal => (dx, dy),
+        Transform::_90 => (-dy, dx),
+        Transform::_180 => (-dx, -dy),
+        Transform::_270 => (dy, -dx),
+        Transform::Flipped => (-dx, dy),
+        Transform::Flipped90 => (-dy, -dx),
+        Transform::Flipped180 => (dx, -dy),
+        Transform::Flipped270 => (dy, dx),
+    }
+}
+
 event!(
     pub struct WaylandPointerRelativeMotionEvent {
         pub pointer: WlPointer,
         pub relative_motion: seat::relative_pointer::RelativeMotionEvent,
+        pub transform: Transform,
         fn time(&self) -> u64 {
             self.relative_motion.utime // this one is already in micros! :3
         }
@@ -207,19 +283,19 @@ event!(
     impl PointerMotionEvent
     {
         fn delta_x(&self) -> f64 {
-            self.relative_motion.delta.0
+            transform_delta(self.transform, self.relative_motion.delta).0
         }
 
         fn delta_y(&self) -> f64 {
-            self.relative_motion.delta.1
+            transform_delta(self.transform, self.relative_motion.delta).1
         }
 
         fn delta_x_unaccel(&self) -> f64 {
-            self.relative_motion.delta_unaccel.0
+            transform_delta(self.transform, self.relative_motion.delta_unaccel).0
         }
 
         fn delta_y_unaccel(&self) -> f64 {
-            self.relative_motion.delta_unaccel.1
+            transform_delta(self.transform, self.relative_motion.delta_unaccel).0
         }
     }
 );
@@ -231,6 +307,7 @@ event!(
         #[AbsolutePositionEvent] {
             pub x: f64,
             pub y: f64,
+            pub transform: Transform,
             pub window_size: Size<i32, Physical>,
         }
     }
@@ -362,6 +439,7 @@ event!(
         #[AbsolutePositionEvent] {
             pub x: f64,
             pub y: f64,
+            pub transform: Transform,
             pub window_size: Size<i32, Physical>,
         }
     }
@@ -390,6 +468,7 @@ event!(
         #[AbsolutePositionEvent] {
             pub x: f64,
             pub y: f64,
+            pub transform: Transform,
             pub window_size: Size<i32, Physical>,
         }
     }
@@ -422,6 +501,8 @@ pub enum WaylandInputSpecialEvent {
         serial: u32,
         surface_x: f64,
         surface_y: f64,
+        transform: Transform,
+        window_size: Size<i32, Physical>,
     },
     PointerLeave {
         pointer: WlPointer,
@@ -430,7 +511,7 @@ pub enum WaylandInputSpecialEvent {
     KeyboardEnter {
         keyboard: WlKeyboard,
         serial: u32,
-        keys: HashSet<u32>,
+        keys: HashSet<Keycode>,
     },
     KeyboardLeave {
         keyboard: WlKeyboard,
