@@ -429,28 +429,6 @@ impl Dispatch<WlPointer, PointerData> for WaylandBackend {
     ) {
         let pointer = proxy.clone();
 
-        // FIXME: For `PointerEventKind::Enter`, we're supposed to also
-        // use `event.position` to determine the position of the pointer.
-        // In particular, a pointer enter can (and *will*) be sent without a motion event,
-        // so we shouldn't rely on the motion event to refresh the cursor upon entering.
-        //
-        // As it stands, if the cursor enters our surface without moving, we hide the external
-        // cursor but don't show our own cursor. That's not great, as it leads to the cursor
-        // being invisible.
-        //
-        // But it also requires frame-perfect user input to trigger.
-        // In practice, this doesn't cause any issues, because
-        // you'll only experience it if you're looking for it.
-        //
-        // To fix this, `PointerEventKind::Enter` should
-        // emit `InputEvent::PointerMotionAbsolute` but that event requires
-        // a `time` value, which we don't get on `PointerEventKind::Enter`.
-        // And this `time` value is quite important, so it's nontrivial to make one up.
-        // Therefore, there is no easy way to send that event correctly.
-        //
-        // It's also just annoying to modify the below code to send two events,
-        // so that alone is reason enough to not fix this for now.
-
         match event {
             wl_pointer::Event::Enter {
                 serial,
