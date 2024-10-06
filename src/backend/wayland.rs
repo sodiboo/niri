@@ -18,7 +18,6 @@ use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_pre
 use smithay::utils::{Logical, Point, Transform};
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::output::OutputState;
-use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_output;
 use smithay_client_toolkit::reexports::client::Connection;
@@ -91,12 +90,15 @@ impl WaylandBackend {
         let qh = queue.handle();
 
         event_loop
-            .insert_source(WaylandSource::new(connection, queue), |_, queue, state| {
-                // This should be the object that we're currently creating.
-                // Is there a better way to do this, without a panic path?
-                let backend = state.backend.wayland();
-                queue.dispatch_pending(backend)
-            })
+            .insert_source(
+                calloop_wayland_source::WaylandSource::new(connection, queue),
+                |_, queue, state| {
+                    // This should be the object that we're currently creating.
+                    // Is there a better way to do this, without a panic path?
+                    let backend = state.backend.wayland();
+                    queue.dispatch_pending(backend)
+                },
+            )
             .unwrap();
 
         let (events, channel) = calloop::channel::channel();
