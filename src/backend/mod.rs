@@ -6,6 +6,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point};
 
 use crate::input::CompositorMod;
 use crate::niri::Niri;
@@ -17,9 +18,13 @@ pub use tty::Tty;
 pub mod winit;
 pub use winit::Winit;
 
+pub mod wayland;
+pub use wayland::WaylandBackend;
+
 pub enum Backend {
     Tty(Tty),
     Winit(Winit),
+    Wayland(WaylandBackend),
 }
 
 #[derive(PartialEq, Eq)]
@@ -54,6 +59,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.init(niri),
             Backend::Winit(winit) => winit.init(niri),
+            Backend::Wayland(wayland) => wayland.init(niri),
         }
     }
 
@@ -61,6 +67,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.seat_name(),
             Backend::Winit(winit) => winit.seat_name(),
+            Backend::Wayland(wayland) => wayland.seat_name(),
         }
     }
 
@@ -71,6 +78,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.with_primary_renderer(f),
             Backend::Winit(winit) => winit.with_primary_renderer(f),
+            Backend::Wayland(wayland) => wayland.with_primary_renderer(f),
         }
     }
 
@@ -83,6 +91,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.render(niri, output, target_presentation_time),
             Backend::Winit(winit) => winit.render(niri, output),
+            Backend::Wayland(wayland) => wayland.render(niri, output),
         }
     }
 
@@ -90,6 +99,7 @@ impl Backend {
         match self {
             Backend::Tty(_) => CompositorMod::Super,
             Backend::Winit(_) => CompositorMod::Alt,
+            Backend::Wayland(_) => CompositorMod::Alt,
         }
     }
 
@@ -97,6 +107,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.change_vt(vt),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -104,6 +115,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.suspend(),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -111,6 +123,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.toggle_debug_tint(),
             Backend::Winit(winit) => winit.toggle_debug_tint(),
+            Backend::Wayland(wayland) => wayland.toggle_debug_tint(),
         }
     }
 
@@ -118,6 +131,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.import_dmabuf(dmabuf),
             Backend::Winit(winit) => winit.import_dmabuf(dmabuf),
+            Backend::Wayland(wayland) => wayland.import_dmabuf(dmabuf),
         }
     }
 
@@ -125,6 +139,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.early_import(surface),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -132,6 +147,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.ipc_outputs(),
             Backend::Winit(winit) => winit.ipc_outputs(),
+            Backend::Wayland(wayland) => wayland.ipc_outputs(),
         }
     }
 
@@ -143,6 +159,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.primary_gbm_device(),
             Backend::Winit(_) => None,
+            Backend::Wayland(_) => None,
         }
     }
 
@@ -150,6 +167,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.set_monitors_active(active),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -157,6 +175,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.set_output_on_demand_vrr(niri, output, enable_vrr),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -164,6 +183,7 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.on_output_config_changed(niri),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
         }
     }
 
@@ -171,6 +191,15 @@ impl Backend {
         match self {
             Backend::Tty(tty) => tty.on_debug_config_changed(),
             Backend::Winit(_) => (),
+            Backend::Wayland(_) => (),
+        }
+    }
+
+    pub fn set_cursor_position_hint(&mut self, location: Point<f64, Logical>) {
+        match self {
+            Backend::Tty(_) => (),
+            Backend::Winit(_) => (),
+            Backend::Wayland(wayland) => wayland.set_cursor_position_hint(location),
         }
     }
 
@@ -195,6 +224,14 @@ impl Backend {
             v
         } else {
             panic!("backend is not Winit")
+        }
+    }
+
+    pub fn wayland(&mut self) -> &mut WaylandBackend {
+        if let Self::Wayland(v) = self {
+            v
+        } else {
+            panic!("backend is not Wayland")
         }
     }
 }
