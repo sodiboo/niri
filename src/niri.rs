@@ -267,6 +267,7 @@ pub struct Niri {
     /// When this happens, the pointer also loses any focus. This is so that touch can prevent
     /// various tooltips from sticking around.
     pub pointer_hidden: bool,
+    pub pointer_inactivity_timer: Option<RegistrationToken>,
     // FIXME: this should be able to be removed once PointerFocus takes grabs into account.
     pub pointer_grab_ongoing: bool,
     pub tablet_cursor_location: Option<Point<f64, Logical>>,
@@ -559,14 +560,17 @@ impl State {
         self.notify_blocker_cleared();
 
         // These should be called periodically, before flushing the clients.
-        self.niri.layout.refresh();
-        self.niri.cursor_manager.check_cursor_image_surface_alive();
-        self.niri.refresh_pointer_outputs();
         self.niri.popups.cleanup();
-        self.niri.global_space.refresh();
-        self.niri.refresh_idle_inhibit();
         self.refresh_popup_grab();
         self.update_keyboard_focus();
+
+        // Needs to be called after updating the keyboard focus.
+        self.niri.refresh_layout();
+
+        self.niri.cursor_manager.check_cursor_image_surface_alive();
+        self.niri.refresh_pointer_outputs();
+        self.niri.global_space.refresh();
+        self.niri.refresh_idle_inhibit();
         self.refresh_pointer_focus();
         foreign_toplevel::refresh(self);
         self.niri.refresh_window_rules();
@@ -609,6 +613,7 @@ impl State {
 
         // We moved the pointer, show it.
         self.niri.pointer_hidden = false;
+        self.niri.reset_pointer_inactivity_timer();
 
         // FIXME: granular
         self.niri.queue_redraw_all();
@@ -1013,6 +1018,7 @@ impl State {
         let mut window_rules_changed = false;
         let mut debug_config_changed = false;
         let mut shaders_changed = false;
+        let mut cursor_inactivity_timeout_changed = false;
         let mut old_config = self.niri.config.borrow_mut();
 
         // Reload the cursor.
@@ -1099,6 +1105,10 @@ impl State {
             shaders_changed = true;
         }
 
+        if config.cursor.hide_after_inactive_ms != old_config.cursor.hide_after_inactive_ms {
+            cursor_inactivity_timeout_changed = true;
+        }
+
         if config.debug != old_config.debug {
             debug_config_changed = true;
         }
@@ -1143,6 +1153,10 @@ impl State {
 
         if shaders_changed {
             self.niri.layout.update_shaders();
+        }
+
+        if cursor_inactivity_timeout_changed {
+            self.niri.reset_pointer_inactivity_timer();
         }
 
         // Can't really update xdg-decoration settings since we have to hide the globals for CSD
@@ -1814,7 +1828,7 @@ impl Niri {
             .unwrap();
 
         drop(config_);
-        Self {
+        let mut niri = Self {
             config,
             config_file_output_config,
 
@@ -1891,6 +1905,7 @@ impl Niri {
             dnd_icon: None,
             pointer_focus: PointerFocus::default(),
             pointer_hidden: false,
+            pointer_inactivity_timer: None,
             pointer_grab_ongoing: false,
             tablet_cursor_location: None,
             gesture_swipe_3f_cumulative: None,
@@ -1928,11 +1943,19 @@ impl Niri {
 
             #[cfg(feature = "xdp-gnome-screencast")]
             mapped_cast_output: HashMap::new(),
-        }
+        };
+
+        niri.reset_pointer_inactivity_timer();
+
+        niri
     }
 
     #[cfg(feature = "dbus")]
     pub fn inhibit_power_key(&mut self) -> anyhow::Result<()> {
+        use std::os::fd::{AsRawFd, BorrowedFd};
+
+        use smithay::reexports::rustix::io::{fcntl_setfd, FdFlags};
+
         let conn = zbus::blocking::ConnectionBuilder::system()?.build()?;
 
         let message = conn.call_method(
@@ -1943,7 +1966,14 @@ impl Niri {
             &("handle-power-key", "niri", "Power key handling", "block"),
         )?;
 
-        let fd = message.body()?;
+        let fd: zbus::zvariant::OwnedFd = message.body()?;
+
+        // Don't leak the fd to child processes.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
+        if let Err(err) = fcntl_setfd(borrowed, FdFlags::CLOEXEC) {
+            warn!("error setting CLOEXEC on inhibit fd: {err:?}");
+        };
+
         self.inhibit_power_key_fd = Some(fd);
 
         Ok(())
@@ -2842,6 +2872,23 @@ impl Niri {
         }
     }
 
+    pub fn refresh_layout(&mut self) {
+        let layout_is_active = match &self.keyboard_focus {
+            KeyboardFocus::Layout { .. } => true,
+            KeyboardFocus::LayerShell { .. } => false,
+
+            // Draw layout as active in these cases to reduce unnecessary window animations.
+            // There's no confusion because these are both fullscreen modes.
+            //
+            // FIXME: when going into the screenshot UI from a layer-shell focus, and then back to
+            // layer-shell, the layout will briefly draw as active, despite never having focus.
+            KeyboardFocus::LockScreen { .. } => true,
+            KeyboardFocus::ScreenshotUi => true,
+        };
+
+        self.layout.refresh(layout_is_active);
+    }
+
     pub fn refresh_idle_inhibit(&mut self) {
         let _span = tracy_client::span!("Niri::refresh_idle_inhibit");
 
@@ -3061,7 +3108,7 @@ impl Niri {
 
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
-        let monitor_elements = mon.render_elements(renderer, target);
+        let monitor_elements: Vec<_> = mon.render_elements(renderer, target).collect();
 
         // Get layer-shell elements.
         let layer_map = layer_map_for_output(output);
@@ -4739,6 +4786,32 @@ impl Niri {
             // FIXME: granular.
             self.queue_redraw_all();
         }
+    }
+
+    pub fn reset_pointer_inactivity_timer(&mut self) {
+        let _span = tracy_client::span!("Niri::reset_pointer_inactivity_timer");
+
+        if let Some(token) = self.pointer_inactivity_timer.take() {
+            self.event_loop.remove(token);
+        }
+
+        let Some(timeout_ms) = self.config.borrow().cursor.hide_after_inactive_ms else {
+            return;
+        };
+
+        let duration = Duration::from_millis(timeout_ms as u64);
+        let timer = Timer::from_duration(duration);
+        let token = self
+            .event_loop
+            .insert_source(timer, move |_, _, state| {
+                state.niri.pointer_inactivity_timer = None;
+                state.niri.pointer_hidden = true;
+                state.niri.queue_redraw_all();
+
+                TimeoutAction::Drop
+            })
+            .unwrap();
+        self.pointer_inactivity_timer = Some(token);
     }
 }
 

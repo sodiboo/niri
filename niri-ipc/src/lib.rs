@@ -132,6 +132,8 @@ pub enum Action {
     },
     /// Power off all monitors via DPMS.
     PowerOffMonitors {},
+    /// Power on all monitors via DPMS.
+    PowerOnMonitors {},
     /// Spawn a command.
     Spawn {
         /// Command to spawn.
@@ -240,10 +242,30 @@ pub enum Action {
     MoveWindowDownOrToWorkspaceDown {},
     /// Move the focused window up in a column or to the workspace above.
     MoveWindowUpOrToWorkspaceUp {},
-    /// Consume or expel the focused window left.
-    ConsumeOrExpelWindowLeft {},
-    /// Consume or expel the focused window right.
-    ConsumeOrExpelWindowRight {},
+    /// Consume or expel a window left.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Consume or expel the focused window left")
+    )]
+    ConsumeOrExpelWindowLeft {
+        /// Id of the window to consume or expel.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Consume or expel a window right.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Consume or expel the focused window right")
+    )]
+    ConsumeOrExpelWindowRight {
+        /// Id of the window to consume or expel.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
     /// Consume the window to the right into the focused column.
     ConsumeWindowIntoColumn {},
     /// Expel the focused window from the column.

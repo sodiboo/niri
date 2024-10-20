@@ -54,6 +54,8 @@ pub struct Config {
     #[knuffel(child, default)]
     pub binds: Binds,
     #[knuffel(child, default)]
+    pub switch_events: SwitchBinds,
+    #[knuffel(child, default)]
     pub debug: DebugConfig,
     #[knuffel(children(name = "workspace"))]
     pub workspaces: Vec<Workspace>,
@@ -69,6 +71,8 @@ pub struct Input {
     pub mouse: Mouse,
     #[knuffel(child, default)]
     pub trackpoint: Trackpoint,
+    #[knuffel(child, default)]
+    pub trackball: Trackball,
     #[knuffel(child, default)]
     pub tablet: Tablet,
     #[knuffel(child, default)]
@@ -174,6 +178,8 @@ pub struct Touchpad {
     pub accel_profile: Option<AccelProfile>,
     #[knuffel(child, unwrap(argument, str))]
     pub scroll_method: Option<ScrollMethod>,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_button: Option<u32>,
     #[knuffel(child, unwrap(argument, str))]
     pub tap_button_map: Option<TapButtonMap>,
     #[knuffel(child)]
@@ -196,6 +202,8 @@ pub struct Mouse {
     pub accel_profile: Option<AccelProfile>,
     #[knuffel(child, unwrap(argument, str))]
     pub scroll_method: Option<ScrollMethod>,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_button: Option<u32>,
     #[knuffel(child)]
     pub left_handed: bool,
     #[knuffel(child)]
@@ -214,6 +222,28 @@ pub struct Trackpoint {
     pub accel_profile: Option<AccelProfile>,
     #[knuffel(child, unwrap(argument, str))]
     pub scroll_method: Option<ScrollMethod>,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_button: Option<u32>,
+    #[knuffel(child)]
+    pub middle_emulation: bool,
+}
+
+#[derive(knuffel::Decode, Debug, Default, PartialEq)]
+pub struct Trackball {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub natural_scroll: bool,
+    #[knuffel(child, unwrap(argument), default)]
+    pub accel_speed: f64,
+    #[knuffel(child, unwrap(argument, str))]
+    pub accel_profile: Option<AccelProfile>,
+    #[knuffel(child, unwrap(argument, str))]
+    pub scroll_method: Option<ScrollMethod>,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_button: Option<u32>,
+    #[knuffel(child)]
+    pub left_handed: bool,
     #[knuffel(child)]
     pub middle_emulation: bool,
 }
@@ -615,6 +645,10 @@ pub struct Cursor {
     pub xcursor_theme: String,
     #[knuffel(child, unwrap(argument), default = 24)]
     pub xcursor_size: u8,
+    #[knuffel(child)]
+    pub hide_on_key_press: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub hide_after_inactive_ms: Option<u32>,
 }
 
 impl Default for Cursor {
@@ -622,6 +656,8 @@ impl Default for Cursor {
         Self {
             xcursor_theme: String::from("default"),
             xcursor_size: 24,
+            hide_on_key_press: false,
+            hide_after_inactive_ms: None,
         }
     }
 }
@@ -1054,6 +1090,24 @@ bitflags! {
     }
 }
 
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
+pub struct SwitchBinds {
+    #[knuffel(child)]
+    pub lid_open: Option<SwitchAction>,
+    #[knuffel(child)]
+    pub lid_close: Option<SwitchAction>,
+    #[knuffel(child)]
+    pub tablet_mode_on: Option<SwitchAction>,
+    #[knuffel(child)]
+    pub tablet_mode_off: Option<SwitchAction>,
+}
+
+#[derive(knuffel::Decode, Debug, Clone, PartialEq)]
+pub struct SwitchAction {
+    #[knuffel(child, unwrap(arguments))]
+    pub spawn: Vec<String>,
+}
+
 // Remember to add new actions to the CLI enum too.
 #[derive(knuffel::Decode, Debug, Clone, PartialEq)]
 pub enum Action {
@@ -1062,6 +1116,7 @@ pub enum Action {
     ChangeVt(i32),
     Suspend,
     PowerOffMonitors,
+    PowerOnMonitors,
     ToggleDebugTint,
     DebugToggleOpaqueRegions,
     DebugToggleDamage,
@@ -1115,7 +1170,11 @@ pub enum Action {
     MoveWindowDownOrToWorkspaceDown,
     MoveWindowUpOrToWorkspaceUp,
     ConsumeOrExpelWindowLeft,
+    #[knuffel(skip)]
+    ConsumeOrExpelWindowLeftById(u64),
     ConsumeOrExpelWindowRight,
+    #[knuffel(skip)]
+    ConsumeOrExpelWindowRightById(u64),
     ConsumeWindowIntoColumn,
     ExpelWindowFromColumn,
     CenterColumn,
@@ -1176,6 +1235,7 @@ impl From<niri_ipc::Action> for Action {
         match value {
             niri_ipc::Action::Quit { skip_confirmation } => Self::Quit(skip_confirmation),
             niri_ipc::Action::PowerOffMonitors {} => Self::PowerOffMonitors,
+            niri_ipc::Action::PowerOnMonitors {} => Self::PowerOnMonitors,
             niri_ipc::Action::Spawn { command } => Self::Spawn(command),
             niri_ipc::Action::DoScreenTransition { delay_ms } => Self::DoScreenTransition(delay_ms),
             niri_ipc::Action::Screenshot {} => Self::Screenshot,
@@ -1221,8 +1281,18 @@ impl From<niri_ipc::Action> for Action {
                 Self::MoveWindowDownOrToWorkspaceDown
             }
             niri_ipc::Action::MoveWindowUpOrToWorkspaceUp {} => Self::MoveWindowUpOrToWorkspaceUp,
-            niri_ipc::Action::ConsumeOrExpelWindowLeft {} => Self::ConsumeOrExpelWindowLeft,
-            niri_ipc::Action::ConsumeOrExpelWindowRight {} => Self::ConsumeOrExpelWindowRight,
+            niri_ipc::Action::ConsumeOrExpelWindowLeft { id: None } => {
+                Self::ConsumeOrExpelWindowLeft
+            }
+            niri_ipc::Action::ConsumeOrExpelWindowLeft { id: Some(id) } => {
+                Self::ConsumeOrExpelWindowLeftById(id)
+            }
+            niri_ipc::Action::ConsumeOrExpelWindowRight { id: None } => {
+                Self::ConsumeOrExpelWindowRight
+            }
+            niri_ipc::Action::ConsumeOrExpelWindowRight { id: Some(id) } => {
+                Self::ConsumeOrExpelWindowRightById(id)
+            }
             niri_ipc::Action::ConsumeWindowIntoColumn {} => Self::ConsumeWindowIntoColumn,
             niri_ipc::Action::ExpelWindowFromColumn {} => Self::ExpelWindowFromColumn,
             niri_ipc::Action::CenterColumn {} => Self::CenterColumn,
@@ -2862,6 +2932,7 @@ mod tests {
                     accel-speed 0.2
                     accel-profile "flat"
                     scroll-method "two-finger"
+                    scroll-button 272
                     tap-button-map "left-middle-right"
                     disabled-on-external-mouse
                 }
@@ -2871,6 +2942,7 @@ mod tests {
                     accel-speed 0.4
                     accel-profile "flat"
                     scroll-method "no-scroll"
+                    scroll-button 273
                     middle-emulation
                 }
 
@@ -2880,6 +2952,18 @@ mod tests {
                     accel-speed 0.0
                     accel-profile "flat"
                     scroll-method "on-button-down"
+                    scroll-button 274
+                }
+
+                trackball {
+                    off
+                    natural-scroll
+                    accel-speed 0.0
+                    accel-profile "flat"
+                    scroll-method "edge"
+                    scroll-button 275
+                    left-handed
+                    middle-emulation
                 }
 
                 tablet {
@@ -2953,6 +3037,8 @@ mod tests {
             cursor {
                 xcursor-theme "breeze_cursors"
                 xcursor-size 16
+                hide-on-key-press
+                hide-after-inactive-ms 3000
             }
 
             screenshot-path "~/Screenshots/screenshot.png"
@@ -3013,6 +3099,11 @@ mod tests {
                 Mod+WheelScrollDown cooldown-ms=150 { focus-workspace-down; }
             }
 
+            switch-events {
+                tablet-mode-on { spawn "bash" "-c" "gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true"; }
+                tablet-mode-off { spawn "bash" "-c" "gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled false"; }
+            }
+
             debug {
                 render-drm-device "/dev/dri/renderD129"
             }
@@ -3045,6 +3136,7 @@ mod tests {
                         accel_speed: 0.2,
                         accel_profile: Some(AccelProfile::Flat),
                         scroll_method: Some(ScrollMethod::TwoFinger),
+                        scroll_button: Some(272),
                         tap_button_map: Some(TapButtonMap::LeftMiddleRight),
                         left_handed: false,
                         disabled_on_external_mouse: true,
@@ -3056,6 +3148,7 @@ mod tests {
                         accel_speed: 0.4,
                         accel_profile: Some(AccelProfile::Flat),
                         scroll_method: Some(ScrollMethod::NoScroll),
+                        scroll_button: Some(273),
                         left_handed: false,
                         middle_emulation: true,
                     },
@@ -3065,7 +3158,18 @@ mod tests {
                         accel_speed: 0.0,
                         accel_profile: Some(AccelProfile::Flat),
                         scroll_method: Some(ScrollMethod::OnButtonDown),
+                        scroll_button: Some(274),
                         middle_emulation: false,
+                    },
+                    trackball: Trackball {
+                        off: true,
+                        natural_scroll: true,
+                        accel_speed: 0.0,
+                        accel_profile: Some(AccelProfile::Flat),
+                        scroll_method: Some(ScrollMethod::Edge),
+                        scroll_button: Some(275),
+                        left_handed: true,
+                        middle_emulation: true,
                     },
                     tablet: Tablet {
                         off: false,
@@ -3154,6 +3258,8 @@ mod tests {
                 cursor: Cursor {
                     xcursor_theme: String::from("breeze_cursors"),
                     xcursor_size: 16,
+                    hide_on_key_press: true,
+                    hide_after_inactive_ms: Some(3000),
                 },
                 screenshot_path: Some(String::from("~/Screenshots/screenshot.png")),
                 hotkey_overlay: HotkeyOverlay {
@@ -3345,6 +3451,24 @@ mod tests {
                         allow_when_locked: false,
                     },
                 ]),
+                switch_events: SwitchBinds {
+                    lid_open: None,
+                    lid_close: None,
+                    tablet_mode_on: Some(SwitchAction {
+                        spawn: vec![
+                            "bash".to_owned(),
+                            "-c".to_owned(),
+                            "gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled true".to_owned(),
+                        ],
+                    }),
+                    tablet_mode_off: Some(SwitchAction {
+                        spawn: vec![
+                            "bash".to_owned(),
+                            "-c".to_owned(),
+                            "gsettings set org.gnome.desktop.a11y.applications screen-keyboard-enabled false".to_owned(),
+                        ],
+                    }),
+                },
                 debug: DebugConfig {
                     render_drm_device: Some(PathBuf::from("/dev/dri/renderD129")),
                     ..Default::default()
