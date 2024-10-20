@@ -101,7 +101,7 @@ use smithay::wayland::xdg_activation::XdgActivationState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
 
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{Backend, RenderResult, Tty, Winit};
+use crate::backend::{self, Backend, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::gnome_shell_introspect::{self, IntrospectToNiri, NiriToIntrospect};
@@ -278,6 +278,12 @@ pub struct Niri {
     pub vertical_finger_scroll_tracker: ScrollTracker,
     pub horizontal_finger_scroll_tracker: ScrollTracker,
     pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
+
+    /// When set to false, no client should get keyboard focus.
+    /// This is used in the wayland backend to properly map keyboard enter and leave events,
+    /// but it could in theory be used for e.g. when no keyboard is connected.
+    /// We don't currently handle that case, though.
+    pub compositor_has_keyboard_focus: bool,
 
     pub lock_state: LockState,
 
@@ -501,8 +507,21 @@ impl State {
             env::var_os("WAYLAND_DISPLAY").is_some() || env::var_os("DISPLAY").is_some();
 
         let mut backend = if has_display {
-            let winit = Winit::new(config.clone(), event_loop.clone())?;
-            Backend::Winit(winit)
+            if env::var_os("WAYLAND_DISPLAY").is_some()
+                && env::var_os("NIRI_WAYLAND_BACKEND").is_some()
+            {
+                // This isn't ready to be the default, so make sure the user knows what they're
+                // doing.
+                warn!("Running with the experimental Wayland backend");
+                let wayland = backend::WaylandBackend::new(config.clone(), event_loop.clone())?;
+                Backend::Wayland(wayland)
+            } else {
+                // But also, anyone on this branch probably wants to use the Wayland backend. So
+                // make sure they don't unknowingly use the winit backend.
+                warn!("Running with the winit backend");
+                let winit = Winit::new(config.clone(), event_loop.clone())?;
+                Backend::Winit(winit)
+            }
         } else {
             let tty = Tty::new(config.clone(), event_loop.clone())
                 .context("error initializing the TTY backend")?;
@@ -558,6 +577,8 @@ impl State {
         self.refresh_ipc_outputs();
         self.ipc_refresh_layout();
         self.ipc_refresh_keyboard_layout_index();
+
+        self.refresh_cursor_position_hint();
 
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_mapped_cast_outputs();
@@ -776,7 +797,9 @@ impl State {
         }
 
         // Compute the current focus.
-        let focus = if self.niri.is_locked() {
+        let focus = if !self.niri.compositor_has_keyboard_focus {
+            KeyboardFocus::Layout { surface: None }
+        } else if self.niri.is_locked() {
             KeyboardFocus::LockScreen {
                 surface: self.niri.lock_surface_focus(),
             }
@@ -1579,6 +1602,14 @@ impl State {
             warn!("error sending windows to introspect: {err:?}");
         }
     }
+
+    pub fn refresh_cursor_position_hint(&mut self) {
+        let _span = tracy_client::span!("State::refresh_pointer_hint");
+
+        let pointer = self.niri.seat.get_pointer().unwrap();
+        self.backend
+            .set_cursor_position_hint(pointer.current_location());
+    }
 }
 
 impl Niri {
@@ -1886,6 +1917,8 @@ impl Niri {
             vertical_finger_scroll_tracker: ScrollTracker::new(10),
             horizontal_finger_scroll_tracker: ScrollTracker::new(10),
             mods_with_finger_scroll_binds,
+
+            compositor_has_keyboard_focus: true,
 
             lock_state: LockState::Unlocked,
 

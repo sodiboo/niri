@@ -86,6 +86,9 @@ wayland-backend = "0.3.7"
 wayland-scanner = "0.31.5"
 xcursor = "0.3.8"
 zbus = { version = "~3.15.2", optional = true }
+smithay-client-toolkit = "0.19.2"
+wayland-egl = "0.32.4"
+calloop-wayland-source = "0.4.0"
 
 [dependencies.smithay]
 workspace = true
