@@ -24,11 +24,16 @@ use smithay::input::pointer::{
     GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
     GrabStartData as PointerGrabStartData, MotionEvent, RelativeMotionEvent,
 };
-use smithay::input::touch::{DownEvent, MotionEvent as TouchMotionEvent, UpEvent};
+use smithay::input::touch::{
+    DownEvent, GrabStartData as TouchGrabStartData, MotionEvent as TouchMotionEvent, UpEvent,
+};
+use smithay::input::SeatHandler;
 use smithay::utils::{Logical, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
+use touch_move_grab::TouchMoveGrab;
 
+use self::move_grab::MoveGrab;
 use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::backend::wayland::{WaylandInputBackend, WaylandInputSpecialEvent};
@@ -37,10 +42,13 @@ use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::spawn;
 use crate::utils::{center, get_monotonic_time, ResizeEdge};
 
+pub mod move_grab;
 pub mod resize_grab;
 pub mod scroll_tracker;
 pub mod spatial_movement_grab;
 pub mod swipe_tracker;
+pub mod touch_move_grab;
+pub mod touch_resize_grab;
 
 pub const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
 
@@ -53,6 +61,20 @@ pub enum CompositorMod {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TabletData {
     pub aspect_ratio: f64,
+}
+
+pub enum PointerOrTouchStartData<D: SeatHandler> {
+    Pointer(PointerGrabStartData<D>),
+    Touch(TouchGrabStartData<D>),
+}
+
+impl<D: SeatHandler> PointerOrTouchStartData<D> {
+    pub fn location(&self) -> Point<f64, Logical> {
+        match self {
+            PointerOrTouchStartData::Pointer(x) => x.location,
+            PointerOrTouchStartData::Touch(x) => x.location,
+        }
+    }
 }
 
 pub trait ProcessSpecialEvent<I: InputBackend> {
@@ -487,7 +509,7 @@ impl State {
     }
 
     fn hide_cursor_if_needed(&mut self) {
-        if !self.niri.config.borrow().cursor.hide_on_key_press {
+        if !self.niri.config.borrow().cursor.hide_when_typing {
             return;
         }
 
@@ -1384,12 +1406,17 @@ impl State {
         self.niri.tablet_cursor_location = None;
 
         // Check if we have an active pointer constraint.
+        //
+        // FIXME: ideally this should use the pointer focus with up-to-date global location.
         let mut pointer_confined = None;
-        if let Some(focus) = &self.niri.pointer_focus.surface {
-            let pos_within_surface = pos - focus.1;
+        if let Some(under) = &self.niri.pointer_contents.surface {
+            // No need to check if the pointer focus surface matches, because here we're checking
+            // for an already-active constraint, and the constraint is deactivated when the focused
+            // surface changes.
+            let pos_within_surface = pos - under.1;
 
             let mut pointer_locked = false;
-            with_pointer_constraint(&focus.0, &pointer, |constraint| {
+            with_pointer_constraint(&under.0, &pointer, |constraint| {
                 let Some(constraint) = constraint else { return };
                 if !constraint.is_active() {
                     return;
@@ -1407,7 +1434,7 @@ impl State {
                         pointer_locked = true;
                     }
                     PointerConstraint::Confined(confine) => {
-                        pointer_confined = Some((focus.clone(), confine.region().cloned()));
+                        pointer_confined = Some((under.clone(), confine.region().cloned()));
                     }
                 }
             });
@@ -1416,7 +1443,7 @@ impl State {
             if pointer_locked {
                 pointer.relative_motion(
                     self,
-                    Some(focus.clone()),
+                    Some(under.clone()),
                     &RelativeMotionEvent {
                         delta: event.delta(),
                         delta_unaccel: event.delta_unaccel(),
@@ -1474,7 +1501,7 @@ impl State {
             self.niri.screenshot_ui.pointer_motion(point);
         }
 
-        let under = self.niri.surface_under_and_global_space(new_pos);
+        let under = self.niri.contents_under(new_pos);
 
         // Handle confined pointer.
         if let Some((focus_surface, region)) = pointer_confined {
@@ -1512,10 +1539,7 @@ impl State {
 
         self.niri.handle_focus_follows_mouse(&under);
 
-        // Activate a new confinement if necessary.
-        self.niri.maybe_activate_pointer_constraint(new_pos, &under);
-
-        self.niri.pointer_focus.clone_from(&under);
+        self.niri.pointer_contents.clone_from(&under);
 
         pointer.motion(
             self,
@@ -1538,6 +1562,9 @@ impl State {
         );
 
         pointer.frame(self);
+
+        // Activate a new confinement if necessary.
+        self.niri.maybe_activate_pointer_constraint();
 
         // Redraw to update the cursor position.
         // FIXME: redraw only outputs overlapping the cursor.
@@ -1573,12 +1600,11 @@ impl State {
             self.niri.screenshot_ui.pointer_motion(point);
         }
 
-        let under = self.niri.surface_under_and_global_space(pos);
+        let under = self.niri.contents_under(pos);
 
         self.niri.handle_focus_follows_mouse(&under);
 
-        self.niri.maybe_activate_pointer_constraint(pos, &under);
-        self.niri.pointer_focus.clone_from(&under);
+        self.niri.pointer_contents.clone_from(&under);
 
         pointer.motion(
             self,
@@ -1591,6 +1617,8 @@ impl State {
         );
 
         pointer.frame(self);
+
+        self.niri.maybe_activate_pointer_constraint();
 
         // We moved the pointer, show it.
         self.niri.pointer_hidden = false;
@@ -1620,8 +1648,40 @@ impl State {
             if let Some(mapped) = self.niri.window_under_cursor() {
                 let window = mapped.window.clone();
 
+                // Check if we need to start an interactive move.
+                if event.button() == Some(MouseButton::Left) && !pointer.is_grabbed() {
+                    let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
+                    let mod_down = match self.backend.mod_key() {
+                        CompositorMod::Super => mods.logo,
+                        CompositorMod::Alt => mods.alt,
+                    };
+                    if mod_down {
+                        let location = pointer.current_location();
+                        let (output, pos_within_output) = self.niri.output_under(location).unwrap();
+                        let output = output.clone();
+
+                        self.niri.layout.activate_window(&window);
+
+                        if self.niri.layout.interactive_move_begin(
+                            window.clone(),
+                            &output,
+                            pos_within_output,
+                        ) {
+                            let start_data = PointerGrabStartData {
+                                focus: None,
+                                button: event.button_code(),
+                                location,
+                            };
+                            let grab = MoveGrab::new(start_data, window.clone());
+                            pointer.set_grab(self, grab, serial, Focus::Clear);
+                            self.niri
+                                .cursor_manager
+                                .set_cursor_image(CursorImageStatus::Named(CursorIcon::Move));
+                        }
+                    }
+                }
                 // Check if we need to start an interactive resize.
-                if event.button() == Some(MouseButton::Right) && !pointer.is_grabbed() {
+                else if event.button() == Some(MouseButton::Right) && !pointer.is_grabbed() {
                     let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
                     let mod_down = match self.backend.mod_key() {
                         CompositorMod::Super => mods.logo,
@@ -1679,7 +1739,6 @@ impl State {
                                 };
                                 let grab = ResizeGrab::new(start_data, window.clone());
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
-                                self.niri.pointer_grab_ongoing = true;
                                 self.niri.cursor_manager.set_cursor_image(
                                     CursorImageStatus::Named(edges.cursor_icon()),
                                 );
@@ -1715,7 +1774,6 @@ impl State {
                         };
                         let grab = SpatialMovementGrab::new(start_data, output);
                         pointer.set_grab(self, grab, serial, Focus::Clear);
-                        self.niri.pointer_grab_ongoing = true;
                         self.niri
                             .cursor_manager
                             .set_cursor_image(CursorImageStatus::Named(CursorIcon::AllScroll));
@@ -1724,11 +1782,11 @@ impl State {
             }
         };
 
-        self.update_pointer_focus();
+        self.update_pointer_contents();
 
         if ButtonState::Pressed == button_state {
-            let layer_focus = self.niri.pointer_focus.layer.clone();
-            self.niri.focus_layer_surface_if_on_demand(layer_focus);
+            let layer_under = self.niri.pointer_contents.layer.clone();
+            self.niri.focus_layer_surface_if_on_demand(layer_under);
         }
 
         if let Some(button) = event.button() {
@@ -1909,14 +1967,24 @@ impl State {
             }
         }
 
+        let scroll_factor = match source {
+            AxisSource::Wheel => self.niri.config.borrow().input.mouse.scroll_factor,
+            AxisSource::Finger => self.niri.config.borrow().input.touchpad.scroll_factor,
+            _ => None,
+        };
+        let scroll_factor = scroll_factor.map(|x| x.0).unwrap_or(1.);
+
         let horizontal_amount = horizontal_amount.unwrap_or_else(|| {
             // Winit backend, discrete scrolling.
             horizontal_amount_v120.unwrap_or(0.0) / 120. * 15.
-        });
+        }) * scroll_factor;
         let vertical_amount = vertical_amount.unwrap_or_else(|| {
             // Winit backend, discrete scrolling.
             vertical_amount_v120.unwrap_or(0.0) / 120. * 15.
-        });
+        }) * scroll_factor;
+
+        let horizontal_amount_v120 = horizontal_amount_v120.map(|x| x * scroll_factor);
+        let vertical_amount_v120 = vertical_amount_v120.map(|x| x * scroll_factor);
 
         let mut frame = AxisFrame::new(event.time_msec()).source(source);
         if horizontal_amount != 0.0 {
@@ -1945,7 +2013,7 @@ impl State {
             }
         }
 
-        self.update_pointer_focus();
+        self.update_pointer_contents();
 
         let pointer = &self.niri.seat.get_pointer().unwrap();
         pointer.axis(self, frame);
@@ -1960,7 +2028,7 @@ impl State {
             return;
         };
 
-        let under = self.niri.surface_under_and_global_space(pos);
+        let under = self.niri.contents_under(pos);
 
         let tablet_seat = self.niri.seat.tablet_seat();
         let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
@@ -2012,7 +2080,7 @@ impl State {
                     tool.tip_down(serial, event.time_msec());
 
                     if let Some(pos) = self.niri.tablet_cursor_location {
-                        let under = self.niri.surface_under_and_global_space(pos);
+                        let under = self.niri.contents_under(pos);
                         if let Some(window) = under.window {
                             self.niri.layout.activate_window(&window);
 
@@ -2042,7 +2110,7 @@ impl State {
             return;
         };
 
-        let under = self.niri.surface_under_and_global_space(pos);
+        let under = self.niri.contents_under(pos);
 
         let tablet_seat = self.niri.seat.tablet_seat();
         let display_handle = self.niri.display_handle.clone();
@@ -2074,6 +2142,7 @@ impl State {
                         self.move_cursor(pos);
                     }
 
+                    self.niri.pointer_hidden = false;
                     self.niri.tablet_cursor_location = None;
                 }
             }
@@ -2107,7 +2176,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2198,7 +2267,7 @@ impl State {
 
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2241,7 +2310,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2259,7 +2328,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2276,7 +2345,7 @@ impl State {
     fn on_gesture_pinch_update<I: InputBackend>(&mut self, event: I::GesturePinchUpdateEvent) {
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2295,7 +2364,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2313,7 +2382,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2331,7 +2400,7 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
-        if self.update_pointer_focus() {
+        if self.update_pointer_contents() {
             pointer.frame(self);
         }
 
@@ -2370,11 +2439,39 @@ impl State {
             return;
         };
 
-        let under = self.niri.surface_under_and_global_space(touch_location);
+        let serial = SERIAL_COUNTER.next_serial();
+
+        let under = self.niri.contents_under(touch_location);
 
         if !handle.is_grabbed() {
             if let Some(window) = under.window {
                 self.niri.layout.activate_window(&window);
+
+                // Check if we need to start an interactive move.
+                let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
+                let mod_down = match self.backend.mod_key() {
+                    CompositorMod::Super => mods.logo,
+                    CompositorMod::Alt => mods.alt,
+                };
+                if mod_down {
+                    let (output, pos_within_output) =
+                        self.niri.output_under(touch_location).unwrap();
+                    let output = output.clone();
+
+                    if self.niri.layout.interactive_move_begin(
+                        window.clone(),
+                        &output,
+                        pos_within_output,
+                    ) {
+                        let start_data = TouchGrabStartData {
+                            focus: None,
+                            slot: evt.slot(),
+                            location: touch_location,
+                        };
+                        let grab = TouchMoveGrab::new(start_data, window.clone());
+                        handle.set_grab(self, grab, serial);
+                    }
+                }
 
                 // FIXME: granular.
                 self.niri.queue_redraw_all();
@@ -2387,7 +2484,6 @@ impl State {
             self.niri.focus_layer_surface_if_on_demand(under.layer);
         };
 
-        let serial = SERIAL_COUNTER.next_serial();
         handle.down(
             self,
             under.surface,
@@ -2423,7 +2519,7 @@ impl State {
         let Some(touch_location) = self.compute_touch_location(&evt) else {
             return;
         };
-        let under = self.niri.surface_under_and_global_space(touch_location);
+        let under = self.niri.contents_under(touch_location);
         handle.motion(
             self,
             under.surface,
@@ -2451,6 +2547,13 @@ impl State {
         let Some(switch) = evt.switch() else {
             return;
         };
+
+        if switch == Switch::Lid {
+            let is_closed = evt.state() == SwitchState::On;
+            debug!("lid switch {}", if is_closed { "closed" } else { "opened" });
+            self.niri.is_lid_closed = is_closed;
+            self.backend.on_output_config_changed(&mut self.niri);
+        }
 
         let action = {
             let bindings = &self.niri.config.borrow().switch_events;

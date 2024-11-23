@@ -188,6 +188,8 @@ pub struct Touchpad {
     pub disabled_on_external_mouse: bool,
     #[knuffel(child)]
     pub middle_emulation: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_factor: Option<FloatOrInt<0, 100>>,
 }
 
 #[derive(knuffel::Decode, Debug, Default, PartialEq)]
@@ -208,6 +210,8 @@ pub struct Mouse {
     pub left_handed: bool,
     #[knuffel(child)]
     pub middle_emulation: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub scroll_factor: Option<FloatOrInt<0, 100>>,
 }
 
 #[derive(knuffel::Decode, Debug, Default, PartialEq)]
@@ -421,6 +425,8 @@ pub struct Layout {
     pub focus_ring: FocusRing,
     #[knuffel(child, default)]
     pub border: Border,
+    #[knuffel(child, default)]
+    pub insert_hint: InsertHint,
     #[knuffel(child, unwrap(children), default)]
     pub preset_column_widths: Vec<PresetSize>,
     #[knuffel(child)]
@@ -442,6 +448,7 @@ impl Default for Layout {
         Self {
             focus_ring: Default::default(),
             border: Default::default(),
+            insert_hint: Default::default(),
             preset_column_widths: Default::default(),
             default_column_width: Default::default(),
             center_focused_column: Default::default(),
@@ -588,6 +595,26 @@ impl From<FocusRing> for Border {
     }
 }
 
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+pub struct InsertHint {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child, default = Self::default().color)]
+    pub color: Color,
+    #[knuffel(child)]
+    pub gradient: Option<Gradient>,
+}
+
+impl Default for InsertHint {
+    fn default() -> Self {
+        Self {
+            off: false,
+            color: Color::from_rgba8_unpremul(127, 200, 255, 128),
+            gradient: None,
+        }
+    }
+}
+
 /// RGB color in [0, 1] with unpremultiplied alpha.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -646,7 +673,7 @@ pub struct Cursor {
     #[knuffel(child, unwrap(argument), default = 24)]
     pub xcursor_size: u8,
     #[knuffel(child)]
-    pub hide_on_key_press: bool,
+    pub hide_when_typing: bool,
     #[knuffel(child, unwrap(argument))]
     pub hide_after_inactive_ms: Option<u32>,
 }
@@ -656,7 +683,7 @@ impl Default for Cursor {
         Self {
             xcursor_theme: String::from("default"),
             xcursor_size: 24,
-            hide_on_key_press: false,
+            hide_when_typing: false,
             hide_after_inactive_ms: None,
         }
     }
@@ -1506,6 +1533,10 @@ pub struct DebugConfig {
     pub disable_resize_throttling: bool,
     #[knuffel(child)]
     pub disable_transactions: bool,
+    #[knuffel(child)]
+    pub keep_laptop_panel_on_when_lid_is_closed: bool,
+    #[knuffel(child)]
+    pub disable_monitor_names: bool,
 }
 
 #[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1887,11 +1918,15 @@ impl OutputName {
         if self.make.is_none() && self.model.is_none() && self.serial.is_none() {
             self.connector.to_string()
         } else {
-            let make = self.make.as_deref().unwrap_or("Unknown");
-            let model = self.model.as_deref().unwrap_or("Unknown");
-            let serial = self.serial.as_deref().unwrap_or("Unknown");
-            format!("{make} {model} {serial}")
+            self.format_make_model_serial()
         }
+    }
+
+    pub fn format_make_model_serial(&self) -> String {
+        let make = self.make.as_deref().unwrap_or("Unknown");
+        let model = self.model.as_deref().unwrap_or("Unknown");
+        let serial = self.serial.as_deref().unwrap_or("Unknown");
+        format!("{make} {model} {serial}")
     }
 
     pub fn matches(&self, target: &str) -> bool {
@@ -2935,6 +2970,7 @@ mod tests {
                     scroll-button 272
                     tap-button-map "left-middle-right"
                     disabled-on-external-mouse
+                    scroll-factor 0.9
                 }
 
                 mouse {
@@ -2944,6 +2980,7 @@ mod tests {
                     scroll-method "no-scroll"
                     scroll-button 273
                     middle-emulation
+                    scroll-factor 0.2
                 }
 
                 trackpoint {
@@ -3028,6 +3065,11 @@ mod tests {
                 }
 
                 center-focused-column "on-overflow"
+
+                insert-hint {
+                    color "rgb(255, 200, 127)"
+                    gradient from="rgba(10, 20, 30, 1.0)" to="#0080ffff" relative-to="workspace-view"
+                }
             }
 
             spawn-at-startup "alacritty" "-e" "fish"
@@ -3037,7 +3079,7 @@ mod tests {
             cursor {
                 xcursor-theme "breeze_cursors"
                 xcursor-size 16
-                hide-on-key-press
+                hide-when-typing
                 hide-after-inactive-ms 3000
             }
 
@@ -3141,6 +3183,7 @@ mod tests {
                         left_handed: false,
                         disabled_on_external_mouse: true,
                         middle_emulation: false,
+                        scroll_factor: Some(FloatOrInt(0.9)),
                     },
                     mouse: Mouse {
                         off: false,
@@ -3151,6 +3194,7 @@ mod tests {
                         scroll_button: Some(273),
                         left_handed: false,
                         middle_emulation: true,
+                        scroll_factor: Some(FloatOrInt(0.2)),
                     },
                     trackpoint: Trackpoint {
                         off: true,
@@ -3226,6 +3270,20 @@ mod tests {
                         active_gradient: None,
                         inactive_gradient: None,
                     },
+                    insert_hint: InsertHint {
+                        off: false,
+                        color: Color::from_rgba8_unpremul(255, 200, 127, 255),
+                        gradient: Some(Gradient {
+                            from: Color::from_rgba8_unpremul(10, 20, 30, 255),
+                            to: Color::from_rgba8_unpremul(0, 128, 255, 255),
+                            angle: 180,
+                            relative_to: GradientRelativeTo::WorkspaceView,
+                            in_: GradientInterpolation {
+                                color_space: GradientColorSpace::Srgb,
+                                hue_interpolation: HueInterpolation::Shorter,
+                            },
+                        }),
+                    },
                     preset_column_widths: vec![
                         PresetSize::Proportion(0.25),
                         PresetSize::Proportion(0.5),
@@ -3258,7 +3316,7 @@ mod tests {
                 cursor: Cursor {
                     xcursor_theme: String::from("breeze_cursors"),
                     xcursor_size: 16,
-                    hide_on_key_press: true,
+                    hide_when_typing: true,
                     hide_after_inactive_ms: Some(3000),
                 },
                 screenshot_path: Some(String::from("~/Screenshots/screenshot.png")),
