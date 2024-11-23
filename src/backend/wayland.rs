@@ -16,7 +16,7 @@ use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, Renderer};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
-use smithay::utils::{Logical, Point, Transform};
+use smithay::utils::{Logical, Physical, Point, Size, Transform};
 use smithay::wayland::presentation::Refresh;
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::output::OutputState;
@@ -77,7 +77,7 @@ pub enum WaylandBackendEvent {
     Input(InputEvent<WaylandInputBackend>),
     Frame,
     Close,
-    Resize,
+    Resize(Size<i32, Physical>),
 }
 
 impl WaylandBackend {
@@ -116,9 +116,9 @@ impl WaylandBackend {
                     WaylandBackendEvent::Input(event) => state.process_input_event(event),
                     WaylandBackendEvent::Frame => niri.queue_redraw(&backend.output),
                     WaylandBackendEvent::Close => state.do_action(Action::Quit(false), true),
-                    WaylandBackendEvent::Resize => {
-                        let size = backend.graphics.window_size();
+                    WaylandBackendEvent::Resize(size) => {
                         debug!("Resizing window to {}x{}", size.w, size.h);
+                        backend.graphics.set_window_size(size);
                         backend.output.change_current_state(
                             Some(Mode {
                                 size,
@@ -236,8 +236,7 @@ impl WaylandBackend {
                     let backend = state.backend.wayland();
 
                     if backend.graphics.window_size() == (1, 1).into() {
-                        backend.graphics.set_window_size((800, 600).into());
-                        backend.send_event(WaylandBackendEvent::Resize);
+                        backend.send_event(WaylandBackendEvent::Resize((800, 600).into()));
                         TimeoutAction::ToDuration(Duration::from_secs_f64(1. / 3.))
                     } else {
                         TimeoutAction::Drop

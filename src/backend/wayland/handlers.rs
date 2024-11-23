@@ -111,8 +111,9 @@ impl WindowHandler for WaylandBackend {
         let new_size = Size::<_, Physical>::from((width, height));
 
         if new_size != self.graphics.window_size() {
-            self.graphics.set_window_size(new_size);
-            self.events.send(WaylandBackendEvent::Resize).unwrap();
+            self.events
+                .send(WaylandBackendEvent::Resize(new_size))
+                .unwrap();
         }
     }
 }
