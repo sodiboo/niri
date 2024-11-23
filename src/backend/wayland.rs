@@ -301,6 +301,11 @@ impl WaylandBackend {
         // This is set to false upon wl_pointer::enter.
         niri.pointer_hidden = true;
 
+        // This disables our interpretation of keyboard modifiers upon keypresses.
+        // We blindly listen to the outer compositor's keyboard state.
+        // and only ever update ours on wl_keyboard::modifiers.
+        niri.seat.get_keyboard().unwrap().set_update_key(false);
+
         let renderer = self.graphics.renderer();
         if let Err(err) = renderer.bind_wl_display(&niri.display_handle) {
             warn!("error binding renderer wl_display: {err}");

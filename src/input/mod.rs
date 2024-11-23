@@ -142,12 +142,22 @@ impl ProcessSpecialEvent<WaylandInputBackend> for State {
 
                 self.niri.compositor_has_keyboard_focus = false;
             }
-            WaylandInputSpecialEvent::KeyboardModifiers { .. } => {
+            WaylandInputSpecialEvent::KeyboardModifiers {
+                depressed,
+                latched,
+                locked,
+                group,
+                ..
+            } => {
+                // why is this called "group" in wl_keyboard but "layout" in smithay?
+                let layout = smithay::input::keyboard::Layout(group);
+
                 let keyboard = self.niri.seat.get_keyboard().unwrap();
-                keyboard.with_xkb_state(self, |ctx| {
-                    // bitch. it's private. can't have shit in detroit
-                    // ctx.state.update_mask()
-                    let _ = ctx;
+
+                // called once in the wayland backend's init() method
+                // keyboard.set_update_key(false);
+                keyboard.with_xkb_state(self, |mut xkb| {
+                    xkb.update_mask(depressed, latched, locked, layout);
                 });
             }
             WaylandInputSpecialEvent::KeyboardKeymap { .. } => {
