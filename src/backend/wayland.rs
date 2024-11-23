@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use calloop::channel::Sender;
+use calloop::timer::{TimeoutAction, Timer};
 use niri_config::{Action, Config, OutputName};
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::input::InputEvent;
@@ -220,6 +221,30 @@ impl WaylandBackend {
         // We initialize everything as 1x1, and pray the compositor chooses a better size
         // upon the first configure event. This commit is necessary to receive that event.
         main_window.commit();
+
+        // Turns out, not all compositors will send a configure event upon the first commit.
+        // Notably, labwc doesn't.
+        // So, force a resize event after a short delay, if and only if the window is still 1x1.
+        // And it turns out, that labwc will resize it back to 1x1 after we resize it to 800x600.
+        // So, we keep doing this in a loop while the window is 1x1.
+        // And when it's not 1x1, we stop doing this forever instead of continuing in a busy loop.
+        // It always stops after 2 iterations. That's a dumb hack, but it works.
+        event_loop
+            .insert_source(
+                Timer::from_duration(Duration::from_secs_f64(1. / 3.)),
+                |_, _, state| {
+                    let backend = state.backend.wayland();
+
+                    if backend.graphics.window_size() == (1, 1).into() {
+                        backend.graphics.set_window_size((800, 600).into());
+                        backend.send_event(WaylandBackendEvent::Resize);
+                        TimeoutAction::ToDuration(Duration::from_secs_f64(1. / 3.))
+                    } else {
+                        TimeoutAction::Drop
+                    }
+                },
+            )
+            .unwrap();
 
         let graphics = WaylandGraphicsBackend::new(main_window, (1, 1).into(), &qh)?;
 
