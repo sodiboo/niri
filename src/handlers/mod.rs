@@ -306,7 +306,7 @@ impl ClientDndGrabHandler for State {
         self.niri.queue_redraw_all();
     }
 
-    fn dropped(&mut self, _seat: Seat<Self>) {
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
         self.niri.dnd_icon = None;
         // FIXME: more granular
         self.niri.queue_redraw_all();

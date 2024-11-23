@@ -16,6 +16,7 @@ use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::utils::{Logical, Point, Transform};
+use smithay::wayland::presentation::Refresh;
 use smithay_client_toolkit::compositor::{CompositorState, Surface};
 use smithay_client_toolkit::output::OutputState;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
@@ -383,10 +384,10 @@ impl WaylandBackend {
 
             let mut presentation_feedbacks = niri.take_presentation_feedbacks(output, &res.states);
             let mode = output.current_mode().unwrap();
-            let refresh = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
+            let refresh_interval = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
             presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
                 get_monotonic_time(),
-                refresh,
+                Refresh::Fixed(refresh_interval),
                 0,
                 wp_presentation_feedback::Kind::empty(),
             );

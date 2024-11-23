@@ -50,6 +50,7 @@ use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufGlob
 use smithay::wayland::drm_lease::{
     DrmLease, DrmLeaseBuilder, DrmLeaseRequest, DrmLeaseState, LeaseRejected,
 };
+use smithay::wayland::presentation::Refresh;
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
 use wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
@@ -1236,7 +1237,8 @@ impl Tty {
                 let refresh = output_state
                     .frame_clock
                     .refresh_interval()
-                    .unwrap_or(Duration::ZERO);
+                    .map(Refresh::Fixed)
+                    .unwrap_or(Refresh::Unknown);
                 // FIXME: ideally should be monotonically increasing for a surface.
                 let seq = meta.sequence as u64;
                 let mut flags = wp_presentation_feedback::Kind::Vsync
