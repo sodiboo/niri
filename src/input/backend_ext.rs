@@ -48,3 +48,9 @@ impl NiriInputDevice for VirtualPointer {
         self.output().cloned()
     }
 }
+
+impl NiriInputDevice for crate::backend::wayland::WaylandInputDevice {
+    fn output(&self, state: &State) -> Option<Output> {
+        None
+    }
+}

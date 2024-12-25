@@ -43,7 +43,9 @@ mod input;
 pub mod seat;
 
 use graphics::WaylandGraphicsBackend;
-pub use input::{RawAbsolutePosition, WaylandInputBackend, WaylandInputSpecialEvent};
+pub use input::{
+    RawAbsolutePosition, WaylandInputBackend, WaylandInputDevice, WaylandInputSpecialEvent,
+};
 use seat::SeatState;
 
 #[allow(dead_code)]
