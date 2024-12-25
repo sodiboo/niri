@@ -1,8 +1,11 @@
+use std::cmp::{max, min};
+
 use niri_config::{BlockOutFrom, BorderRule, CornerRadius, Match, WindowRule};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+use smithay::utils::{Logical, Size};
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgToplevelSurfaceRoleAttributes};
 
-use crate::layout::workspace::ColumnWidth;
+use crate::layout::scrolling::ColumnWidth;
 use crate::utils::with_toplevel_role;
 
 pub mod mapped;
@@ -236,6 +239,40 @@ impl ResolvedWindowRules {
 
         resolved
     }
+
+    pub fn apply_min_size(&self, min_size: Size<i32, Logical>) -> Size<i32, Logical> {
+        let mut size = min_size;
+
+        if let Some(x) = self.min_width {
+            size.w = max(size.w, i32::from(x));
+        }
+        if let Some(x) = self.min_height {
+            size.h = max(size.h, i32::from(x));
+        }
+
+        size
+    }
+
+    pub fn apply_max_size(&self, max_size: Size<i32, Logical>) -> Size<i32, Logical> {
+        let mut size = max_size;
+
+        if let Some(x) = self.max_width {
+            if size.w == 0 {
+                size.w = i32::from(x);
+            } else if x > 0 {
+                size.w = min(size.w, i32::from(x));
+            }
+        }
+        if let Some(x) = self.max_height {
+            if size.h == 0 {
+                size.h = i32::from(x);
+            } else if x > 0 {
+                size.h = min(size.h, i32::from(x));
+            }
+        }
+
+        size
+    }
 }
 
 fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m: &Match) -> bool {
@@ -262,7 +299,7 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
         let Some(app_id) = &role.app_id else {
             return false;
         };
-        if !app_id_re.is_match(app_id) {
+        if !app_id_re.0.is_match(app_id) {
             return false;
         }
     }
@@ -271,7 +308,7 @@ fn window_matches(window: WindowRef, role: &XdgToplevelSurfaceRoleAttributes, m:
         let Some(title) = &role.title else {
             return false;
         };
-        if !title_re.is_match(title) {
+        if !title_re.0.is_match(title) {
             return false;
         }
     }

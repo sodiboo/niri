@@ -62,8 +62,8 @@ use smithay::{
     delegate_input_method_manager, delegate_output, delegate_pointer_constraints,
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
-    delegate_tablet_manager, delegate_text_input_manager, delegate_viewporter,
-    delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
 };
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
@@ -306,7 +306,39 @@ impl ClientDndGrabHandler for State {
         self.niri.queue_redraw_all();
     }
 
-    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+    fn dropped(&mut self, target: Option<WlSurface>, validated: bool, _seat: Seat<Self>) {
+        trace!("client dropped, target: {target:?}, validated: {validated}");
+
+        // Activate the target output, since that's how Firefox drag-tab-into-new-window works for
+        // example. On successful drop, additionally activate the target window.
+        let mut activate_output = true;
+        if let Some(target) = validated.then_some(target).flatten() {
+            if let Some(root) = self.niri.root_surface.get(&target) {
+                if let Some((mapped, _)) = self.niri.layout.find_window_and_output(root) {
+                    let window = mapped.window.clone();
+                    self.niri.layout.activate_window(&window);
+                    activate_output = false;
+                }
+            }
+        }
+
+        if activate_output {
+            // Find the output from cursor coordinates.
+            //
+            // FIXME: uhhh, we can't actually properly tell if the DnD comes from pointer or touch,
+            // and if it comes from touch, then what the coordinates are. Need to pass more
+            // parameters from Smithay I guess.
+            //
+            // Assume that hidden pointer means touch DnD.
+            if !self.niri.pointer_hidden {
+                // We can't even get the current pointer location because it's locked (we're deep
+                // in the grab call stack here). So use the last known one.
+                if let Some(output) = &self.niri.pointer_contents.output {
+                    self.niri.layout.activate_output(output);
+                }
+            }
+        }
+
         self.niri.dnd_icon = None;
         // FIXME: more granular
         self.niri.queue_redraw_all();
@@ -372,6 +404,10 @@ impl SessionLockHandler for State {
 
     fn unlock(&mut self) {
         self.niri.unlock();
+        self.niri.activate_monitors(&mut self.backend);
+        self.niri
+            .idle_notifier_state
+            .notify_activity(&self.niri.seat);
     }
 
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
@@ -410,6 +446,7 @@ impl SecurityContextHandler for State {
                     compositor_state: Default::default(),
                     can_view_decoration_globals: config.prefer_no_csd,
                     restricted: true,
+                    credentials_unknown: false,
                 });
 
                 if let Err(err) = state.niri.display_handle.insert_client(client, data) {
@@ -637,10 +674,12 @@ impl XdgActivationHandler for State {
                 self.niri.layout.activate_window(&window);
                 self.niri.layer_shell_on_demand_focus = None;
                 self.niri.queue_redraw_all();
-
-                self.niri.activation_state.remove_token(&token);
+            } else if let Some(unmapped) = self.niri.unmapped_windows.get_mut(&surface) {
+                unmapped.activation_token_data = Some(token_data);
             }
         }
+
+        self.niri.activation_state.remove_token(&token);
     }
 }
 delegate_xdg_activation!(State);
@@ -662,3 +701,5 @@ delegate_output_management!(State);
 
 impl MutterX11InteropHandler for State {}
 delegate_mutter_x11_interop!(State);
+
+delegate_single_pixel_buffer!(State);

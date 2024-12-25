@@ -1,4 +1,4 @@
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, LazyCell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -28,8 +28,8 @@ use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, Relocate, RelocateRenderElement,
 };
 use smithay::backend::renderer::element::{
-    default_primary_scanout_output_compare, AsRenderElements, Element as _, Id, Kind,
-    PrimaryScanoutOutput, RenderElementStates,
+    default_primary_scanout_output_compare, Element as _, Id, Kind, PrimaryScanoutOutput,
+    RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::sync::SyncPoint;
@@ -41,8 +41,8 @@ use smithay::desktop::utils::{
     under_from_surface_tree, update_surface_primary_scanout_output, OutputPresentationFeedback,
 };
 use smithay::desktop::{
-    layer_map_for_output, LayerSurface, PopupGrab, PopupManager, PopupUngrabStrategy, Space,
-    Window, WindowSurfaceType,
+    layer_map_for_output, LayerMap, LayerSurface, PopupGrab, PopupManager, PopupUngrabStrategy,
+    Space, Window, WindowSurfaceType,
 };
 use smithay::input::keyboard::Layout as KeyboardLayout;
 use smithay::input::pointer::{CursorIcon, CursorImageAttributes, CursorImageStatus, MotionEvent};
@@ -92,6 +92,8 @@ use smithay::wayland::shell::wlr_layer::{self, Layer, WlrLayerShellState};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shm::ShmState;
+#[cfg(test)]
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::text_input::TextInputManagerState;
@@ -100,8 +102,9 @@ use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
 
+use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{self, Backend, RenderResult, Tty, Winit};
+use crate::backend::{self, Backend, Headless, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::gnome_shell_introspect::{self, IntrospectToNiri, NiriToIntrospect};
@@ -116,9 +119,12 @@ use crate::input::{
     apply_libinput_settings, mods_with_finger_scroll_binds, mods_with_wheel_binds, TabletData,
 };
 use crate::ipc::server::IpcServer;
+use crate::layer::mapped::LayerSurfaceRenderElement;
+use crate::layer::MappedLayer;
 use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::WorkspaceId;
 use crate::layout::{Layout, LayoutElement as _, MonitorRenderElement};
+use crate::niri_render_elements;
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
@@ -147,7 +153,6 @@ use crate::utils::{
     make_screenshot_path, output_matches_name, output_size, send_scale_transform, write_png_rgba8,
 };
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
-use crate::{animation, niri_render_elements};
 
 const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 
@@ -177,6 +182,9 @@ pub struct Niri {
     /// Whether the at-startup=true window rules are active.
     pub is_at_startup: bool,
 
+    /// Clock for driving animations.
+    pub clock: Clock,
+
     // Each workspace corresponds to a Space. Each workspace generally has one Output mapped to it,
     // however it may have none (when there are no outputs connected) or multiple (when mirroring).
     pub layout: Layout<Mapped>,
@@ -190,6 +198,9 @@ pub struct Niri {
 
     /// Layer surfaces which don't have a buffer attached yet.
     pub unmapped_layer_surfaces: HashSet<WlSurface>,
+
+    /// Extra data for mapped layer surfaces.
+    pub mapped_layer_surfaces: HashMap<LayerSurface, MappedLayer>,
 
     // Cached root surface for every surface, so that we can access it in destroyed() where the
     // normal get_parent() is cleared out.
@@ -254,6 +265,15 @@ pub struct Niri {
     pub activation_state: XdgActivationState,
     pub mutter_x11_interop_state: MutterX11InteropManagerState,
 
+    // This will not work as is outside of tests, so it is gated with #[cfg(test)] for now. In
+    // particular, shaders will need to learn about the single pixel buffer. Also, it must be
+    // verified that a black single-pixel-buffer background lets the foreground surface to be
+    // unredirected.
+    //
+    // https://github.com/YaLTeR/niri/issues/619
+    #[cfg(test)]
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+
     pub seat: Seat<State>,
     /// Scancodes of the keys to suppress.
     pub suppressed_keys: HashSet<Keycode>,
@@ -261,6 +281,7 @@ pub struct Niri {
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
+    pub previously_focused_window: Option<Window>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
 
@@ -323,7 +344,7 @@ pub struct Niri {
 
     // Casts are dropped before PipeWire to prevent a double-free (yay).
     pub casts: Vec<Cast>,
-    pub pipewire: Option<PipeWire>,
+    pub pipewire: LazyCell<Option<PipeWire>, Box<dyn FnOnce() -> Option<PipeWire>>>,
 
     // Screencast output for each mapped window.
     #[cfg(feature = "xdp-gnome-screencast")]
@@ -516,6 +537,7 @@ impl State {
         event_loop: LoopHandle<'static, State>,
         stop_signal: LoopSignal,
         display: Display<State>,
+        headless: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let _span = tracy_client::span!("State::new");
 
@@ -524,7 +546,10 @@ impl State {
         let has_display =
             env::var_os("WAYLAND_DISPLAY").is_some() || env::var_os("DISPLAY").is_some();
 
-        let mut backend = if has_display {
+        let mut backend = if headless {
+            let headless = Headless::new();
+            Backend::Headless(headless)
+        } else if has_display {
             if env::var_os("WAYLAND_DISPLAY").is_some()
                 && env::var_os("NIRI_WAYLAND_BACKEND").is_some()
             {
@@ -562,12 +587,21 @@ impl State {
 
         self.refresh();
 
+        // Advance animations to the current time (not target render time) before rendering outputs
+        // in order to clear completed animations and render elements. Even if we're not rendering,
+        // it's good to advance every now and then so the workspace clean-up and animations don't
+        // build up (the 1 second frame callback timer will call this line).
+        self.niri.advance_animations();
+
         self.niri.redraw_queued_outputs(&mut self.backend);
 
         {
             let _span = tracy_client::span!("flush_clients");
             self.niri.display_handle.flush_clients().unwrap();
         }
+
+        // Clear the time so it's fetched afresh next iteration.
+        self.niri.clock.clear();
     }
 
     fn refresh(&mut self) {
@@ -696,6 +730,27 @@ impl State {
         }
 
         rv
+    }
+
+    /// Focus a specific window, taking care of a potential active output change and cursor
+    /// warp.
+    pub fn focus_window(&mut self, window: &Window) {
+        let active_output = self.niri.layout.active_output().cloned();
+
+        self.niri.layout.activate_window(window);
+
+        let new_active = self.niri.layout.active_output().cloned();
+        #[allow(clippy::collapsible_if)]
+        if new_active != active_output {
+            if !self.maybe_warp_cursor_to_focus_centered() {
+                self.move_cursor_to_output(&new_active.unwrap());
+            }
+        } else {
+            self.maybe_warp_cursor_to_focus();
+        }
+
+        // FIXME: granular
+        self.niri.queue_redraw_all();
     }
 
     pub fn maybe_warp_cursor_to_focus(&mut self) -> bool {
@@ -909,12 +964,14 @@ impl State {
             );
 
             // Tell the windows their new focus state for window rule purposes.
+            let mut previous_focus = None;
             if let KeyboardFocus::Layout {
                 surface: Some(surface),
             } = &self.niri.keyboard_focus
             {
                 if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                     mapped.set_is_focused(false);
+                    previous_focus = Some(mapped.window.clone());
                 }
             }
             if let KeyboardFocus::Layout {
@@ -924,6 +981,29 @@ impl State {
                 if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                     mapped.set_is_focused(true);
                 }
+            }
+
+            // Update the previous focus but only when staying focused on the layout.
+            //
+            // Case 1: opening and closing exclusive-keyboard layer-shell (e.g. app launcher). This
+            // involves going from Layout to LayerShell, then from LayerShell to Layout. The
+            // previously focused window should stay unchanged.
+            //
+            //     Case 1.5: opening layer-shell, in the background switching layout focus, closing
+            //     layer-shell. With the current logic, this won't update the previously focused
+            //     window, which is incorrect. But this case should be rare.
+            //
+            // Case 2: switching to an empty workspace, then hitting FocusWindowPrevious. The focus
+            // should go to the window that was just focused. The keyboard focus goes from Layout
+            // (with Some surface) to Layout (with None surface), so we update the previously
+            // focused window.
+            //
+            // FIXME: Ideally this should happen inside Layout itself, then there wouldn't be any
+            // problems with layer-shell, etc.
+            if matches!(self.niri.keyboard_focus, KeyboardFocus::Layout { .. })
+                && matches!(focus, KeyboardFocus::Layout { .. })
+            {
+                self.niri.previously_focused_window = previous_focus;
             }
 
             if let Some(grab) = self.niri.popup_grab.as_mut() {
@@ -1021,12 +1101,11 @@ impl State {
             self.niri.layout.ensure_named_workspace(ws_config);
         }
 
-        let slowdown = if config.animations.off {
-            0.
-        } else {
-            config.animations.slowdown.clamp(0., 100.)
-        };
-        animation::ANIMATION_SLOWDOWN.store(slowdown, Ordering::Relaxed);
+        let rate = 1.0 / config.animations.slowdown.max(0.001);
+        self.niri.clock.set_rate(rate);
+        self.niri
+            .clock
+            .set_complete_instantly(config.animations.off);
 
         *CHILD_ENV.write().unwrap() = mem::take(&mut config.environment);
 
@@ -1035,6 +1114,7 @@ impl State {
         let mut output_config_changed = false;
         let mut preserved_output_config = None;
         let mut window_rules_changed = false;
+        let mut layer_rules_changed = false;
         let mut debug_config_changed = false;
         let mut shaders_changed = false;
         let mut cursor_inactivity_timeout_changed = false;
@@ -1092,6 +1172,10 @@ impl State {
 
         if config.window_rules != old_config.window_rules {
             window_rules_changed = true;
+        }
+
+        if config.layer_rules != old_config.layer_rules {
+            layer_rules_changed = true;
         }
 
         if config.animations.window_resize.custom_shader
@@ -1174,6 +1258,10 @@ impl State {
 
         if window_rules_changed {
             self.niri.recompute_window_rules();
+        }
+
+        if layer_rules_changed {
+            self.niri.recompute_layer_rules();
         }
 
         if shaders_changed {
@@ -1436,6 +1524,8 @@ impl State {
 
     #[cfg(feature = "xdp-gnome-screencast")]
     pub fn on_screen_cast_msg(&mut self, msg: ScreenCastToNiri) {
+        use smithay::reexports::gbm::Modifier;
+
         use crate::dbus::mutter_screen_cast::StreamTargetId;
 
         match msg {
@@ -1452,13 +1542,15 @@ impl State {
                 let gbm = match self.backend.gbm_device() {
                     Some(gbm) => gbm,
                     None => {
-                        debug!("no GBM device available");
+                        warn!("error starting screencast: no GBM device available");
+                        self.niri.stop_cast(session_id);
                         return;
                     }
                 };
 
-                let Some(pw) = &self.niri.pipewire else {
-                    error!("screencasting must be disabled if PipeWire is missing");
+                let Some(pw) = &*self.niri.pipewire else {
+                    warn!("error starting screencast: PipeWire failed to initialize");
+                    self.niri.stop_cast(session_id);
                     return;
                 };
 
@@ -1510,12 +1602,22 @@ impl State {
                     }
                 };
 
-                let render_formats = self
+                let mut render_formats = self
                     .backend
                     .with_primary_renderer(|renderer| {
                         renderer.egl_context().dmabuf_render_formats().clone()
                     })
                     .unwrap_or_default();
+
+                {
+                    let config = self.niri.config.borrow();
+                    if config.debug.force_pipewire_invalid_modifier {
+                        render_formats = render_formats
+                            .into_iter()
+                            .filter(|f| f.modifier == Modifier::Invalid)
+                            .collect();
+                    }
+                }
 
                 let res = pw.start_cast(
                     gbm,
@@ -1641,7 +1743,13 @@ impl Niri {
         let config_ = config.borrow();
         let config_file_output_config = config_.outputs.clone();
 
-        let layout = Layout::new(&config_);
+        let mut animation_clock = Clock::default();
+
+        let rate = 1.0 / config_.animations.slowdown.max(0.001);
+        animation_clock.set_rate(rate);
+        animation_clock.set_complete_instantly(config_.animations.off);
+
+        let layout = Layout::new(animation_clock.clone(), &config_);
 
         let (blocker_cleared_tx, blocker_cleared_rx) = mpsc::channel();
 
@@ -1752,6 +1860,9 @@ impl Niri {
         let mutter_x11_interop_state =
             MutterX11InteropManagerState::new::<State, _>(&display_handle, move |_| true);
 
+        #[cfg(test)]
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
+
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         seat.add_keyboard(
             config_.input.keyboard.xkb.to_xkb_config(),
@@ -1769,8 +1880,9 @@ impl Niri {
         let mods_with_finger_scroll_binds =
             mods_with_finger_scroll_binds(backend.mod_key(), &config_.binds);
 
-        let screenshot_ui = ScreenshotUi::new(config.clone());
-        let config_error_notification = ConfigErrorNotification::new(config.clone());
+        let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
+        let config_error_notification =
+            ConfigErrorNotification::new(animation_clock.clone(), config.clone());
 
         let mut hotkey_overlay = HotkeyOverlay::new(config.clone(), backend.mod_key());
         if !config_.hotkey_overlay.skip_at_startup {
@@ -1804,6 +1916,7 @@ impl Niri {
                     compositor_state: Default::default(),
                     can_view_decoration_globals: config.prefer_no_csd,
                     restricted: false,
+                    credentials_unknown: false,
                 });
 
                 if let Err(err) = state.niri.display_handle.insert_client(client, data) {
@@ -1820,13 +1933,14 @@ impl Niri {
             }
         };
 
-        let pipewire = match PipeWire::new(&event_loop) {
+        let loop_handle = event_loop.clone();
+        let pipewire = LazyCell::new(Box::new(move || match PipeWire::new(&loop_handle) {
             Ok(pipewire) => Some(pipewire),
             Err(err) => {
                 warn!("error connecting to PipeWire, screencasting will not work: {err:?}");
                 None
             }
-        };
+        }) as _);
 
         let display_source = Generic::new(display, Interest::READ, Mode::Level);
         event_loop
@@ -1846,6 +1960,7 @@ impl Niri {
                     let _span = tracy_client::span!("startup timeout");
                     state.niri.is_at_startup = false;
                     state.niri.recompute_window_rules();
+                    state.niri.recompute_layer_rules();
                     TimeoutAction::Drop
                 },
             )
@@ -1863,12 +1978,14 @@ impl Niri {
             display_handle,
             start_time: Instant::now(),
             is_at_startup: true,
+            clock: animation_clock,
 
             layout,
             global_space: Space::default(),
             output_state: HashMap::new(),
             unmapped_windows: HashMap::new(),
             unmapped_layer_surfaces: HashSet::new(),
+            mapped_layer_surfaces: HashMap::new(),
             root_surface: HashMap::new(),
             dmabuf_pre_commit_hook: HashMap::new(),
             blocker_cleared_tx,
@@ -1918,10 +2035,13 @@ impl Niri {
             gamma_control_manager_state,
             activation_state,
             mutter_x11_interop_state,
+            #[cfg(test)]
+            single_pixel_buffer_state,
 
             seat,
             keyboard_focus: KeyboardFocus::Layout { surface: None },
             layer_shell_on_demand_focus: None,
+            previously_focused_window: None,
             idle_inhibiting_surfaces: HashSet::new(),
             is_fdo_idle_inhibited: Arc::new(AtomicBool::new(false)),
             cursor_manager,
@@ -2356,7 +2476,19 @@ impl Niri {
 
         // Check if some layer-shell surface is on top.
         let layers = layer_map_for_output(output);
-        let layer_under = |layer| layers.layer_under(layer, pos_within_output).is_some();
+        let layer_under = |layer| {
+            layers
+                .layer_under(layer, pos_within_output)
+                .and_then(|layer| {
+                    let layer_pos_within_output =
+                        layers.layer_geometry(layer).unwrap().loc.to_f64();
+                    layer.surface_under(
+                        pos_within_output - layer_pos_within_output,
+                        WindowSurfaceType::ALL,
+                    )
+                })
+                .is_some()
+        };
         if layer_under(Layer::Overlay) {
             return None;
         }
@@ -3004,6 +3136,22 @@ impl Niri {
         }
     }
 
+    pub fn advance_animations(&mut self) {
+        let _span = tracy_client::span!("Niri::advance_animations");
+
+        self.layout.advance_animations();
+        self.config_error_notification.advance_animations();
+        self.screenshot_ui.advance_animations();
+
+        for state in self.output_state.values_mut() {
+            if let Some(transition) = &mut state.screen_transition {
+                if transition.is_done() {
+                    state.screen_transition = None;
+                }
+            }
+        }
+    }
+
     pub fn update_render_elements(&mut self, output: Option<&Output>) {
         self.layout.update_render_elements(output);
 
@@ -3142,25 +3290,7 @@ impl Niri {
         // Get layer-shell elements.
         let layer_map = layer_map_for_output(output);
         let mut extend_from_layer = |elements: &mut Vec<OutputRenderElements<R>>, layer| {
-            let iter = layer_map
-                .layers_on(layer)
-                .filter_map(|surface| {
-                    layer_map
-                        .layer_geometry(surface)
-                        .map(|geo| (geo.loc, surface))
-                })
-                .flat_map(|(loc, surface)| {
-                    surface
-                        .render_elements(
-                            renderer,
-                            loc.to_physical_precise_round(output_scale),
-                            output_scale,
-                            1.,
-                        )
-                        .into_iter()
-                        .map(OutputRenderElements::Wayland)
-                });
-            elements.extend(iter);
+            self.render_layer(renderer, target, output_scale, &layer_map, layer, elements);
         };
 
         // The upper layer-shell elements go next.
@@ -3191,6 +3321,29 @@ impl Niri {
         elements
     }
 
+    fn render_layer<R: NiriRenderer>(
+        &self,
+        renderer: &mut R,
+        target: RenderTarget,
+        scale: Scale<f64>,
+        layer_map: &LayerMap,
+        layer: Layer,
+        elements: &mut Vec<OutputRenderElements<R>>,
+    ) {
+        let iter = layer_map
+            .layers_on(layer)
+            .filter_map(|surface| {
+                let mapped = self.mapped_layer_surfaces.get(surface)?;
+                let geo = layer_map.layer_geometry(surface)?;
+                Some((mapped, geo))
+            })
+            .flat_map(|(mapped, geo)| {
+                let elements = mapped.render(renderer, geo, scale, target);
+                elements.into_iter().map(OutputRenderElements::LayerSurface)
+            });
+        elements.extend(iter);
+    }
+
     fn redraw(&mut self, backend: &mut Backend, output: &Output) {
         let _span = tracy_client::span!("Niri::redraw");
 
@@ -3203,38 +3356,24 @@ impl Niri {
 
         let target_presentation_time = state.frame_clock.next_presentation_time();
 
+        // Freeze the clock at the target time.
+        self.clock.set_unadjusted(target_presentation_time);
+
+        self.update_render_elements(Some(output));
+
         let mut res = RenderResult::Skipped;
         if self.monitors_active {
-            // Update from the config and advance the animations.
-            self.layout.advance_animations(target_presentation_time);
-
-            if let Some(transition) = &mut state.screen_transition {
-                transition.advance_animations(target_presentation_time);
-                if transition.is_done() {
-                    state.screen_transition = None;
-                }
-            }
-
+            let state = self.output_state.get_mut(output).unwrap();
             state.unfinished_animations_remain = self.layout.are_animations_ongoing(Some(output));
-
-            self.config_error_notification
-                .advance_animations(target_presentation_time);
             state.unfinished_animations_remain |=
                 self.config_error_notification.are_animations_ongoing();
-
-            self.screenshot_ui
-                .advance_animations(target_presentation_time);
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
+            state.unfinished_animations_remain |= state.screen_transition.is_some();
 
             // Also keep redrawing if the current cursor is animated.
             state.unfinished_animations_remain |= self
                 .cursor_manager
                 .is_current_cursor_animated(output.current_scale().integer_scale());
-
-            // Also keep redrawing during a screen transition.
-            state.unfinished_animations_remain |= state.screen_transition.is_some();
-
-            self.update_render_elements(Some(output));
 
             // Render.
             res = backend.render(self, output, target_presentation_time);
@@ -4780,10 +4919,14 @@ impl Niri {
         let delay = delay_ms.map_or(screen_transition::DELAY, |d| {
             Duration::from_millis(u64::from(d))
         });
-        let start_at = get_monotonic_time() + delay;
+
         for (output, from_texture) in textures {
             let state = self.output_state.get_mut(&output).unwrap();
-            state.screen_transition = Some(ScreenTransition::new(from_texture, start_at));
+            state.screen_transition = Some(ScreenTransition::new(
+                from_texture,
+                delay,
+                self.clock.clone(),
+            ));
         }
 
         // We don't actually need to queue a redraw because the point is to freeze the screen for a
@@ -4826,6 +4969,26 @@ impl Niri {
         }
     }
 
+    pub fn recompute_layer_rules(&mut self) {
+        let _span = tracy_client::span!("Niri::recompute_layer_rules");
+
+        let mut changed = false;
+        {
+            let rules = &self.config.borrow().layer_rules;
+
+            for mapped in self.mapped_layer_surfaces.values_mut() {
+                if mapped.recompute_layer_rules(rules, self.is_at_startup) {
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            // FIXME: granular.
+            self.queue_redraw_all();
+        }
+    }
+
     pub fn reset_pointer_inactivity_timer(&mut self) {
         let _span = tracy_client::span!("Niri::reset_pointer_inactivity_timer");
 
@@ -4858,6 +5021,8 @@ pub struct ClientState {
     pub can_view_decoration_globals: bool,
     /// Whether this client is denied from the restricted protocols such as security-context.
     pub restricted: bool,
+    /// We cannot retrieve this client's socket credentials.
+    pub credentials_unknown: bool,
 }
 
 impl ClientData for ClientState {
@@ -4869,6 +5034,7 @@ niri_render_elements! {
     OutputRenderElements<R> => {
         Monitor = MonitorRenderElement<R>,
         Tile = TileRenderElement<R>,
+        LayerSurface = LayerSurfaceRenderElement<R>,
         Wayland = WaylandSurfaceRenderElement<R>,
         NamedPointer = MemoryRenderBufferRenderElement<R>,
         SolidColor = SolidColorRenderElement,

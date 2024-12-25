@@ -178,11 +178,8 @@ impl State {
     {
         let _span = tracy_client::span!("process_input_event");
 
-        // A bit of a hack, but animation end runs some logic (i.e. workspace clean-up) and it
-        // doesn't always trigger due to damage, etc. So run it here right before it might prove
-        // important. Besides, animations affect the input, so it's best to have up-to-date values
-        // here.
-        self.niri.layout.advance_animations(get_monotonic_time());
+        // Make sure some logic like workspace clean-up has a chance to run before doing actions.
+        self.niri.advance_animations();
 
         if self.niri.monitors_active {
             // Notify the idle-notifier of activity.
@@ -618,7 +615,8 @@ impl State {
                 self.niri.debug_toggle_damage();
             }
             Action::Spawn(command) => {
-                spawn(command);
+                let (token, _) = self.niri.activation_state.create_external_token(None);
+                spawn(command, Some(token.clone()));
             }
             Action::DoScreenTransition(delay_ms) => {
                 self.backend.with_primary_renderer(|renderer| {
@@ -636,6 +634,10 @@ impl State {
                 }
             }
             Action::ConfirmScreenshot => {
+                if !self.niri.screenshot_ui.is_open() {
+                    return;
+                }
+
                 self.backend.with_primary_renderer(|renderer| {
                     match self.niri.screenshot_ui.capture(renderer) {
                         Ok((size, pixels)) => {
@@ -656,6 +658,10 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::CancelScreenshot => {
+                if !self.niri.screenshot_ui.is_open() {
+                    return;
+                }
+
                 self.niri.screenshot_ui.close();
                 self.niri
                     .cursor_manager
@@ -670,8 +676,8 @@ impl State {
                 self.open_screenshot_ui();
             }
             Action::ScreenshotWindow => {
-                let active = self.niri.layout.active_window();
-                if let Some((mapped, output)) = active {
+                let focus = self.niri.layout.focus_with_output();
+                if let Some((mapped, output)) = focus {
                     self.backend.with_primary_renderer(|renderer| {
                         if let Err(err) = self.niri.screenshot_window(renderer, output, mapped) {
                             warn!("error taking screenshot: {err:?}");
@@ -723,22 +729,12 @@ impl State {
                 let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
-                    let active_output = self.niri.layout.active_output().cloned();
-
-                    self.niri.layout.activate_window(&window);
-
-                    let new_active = self.niri.layout.active_output().cloned();
-                    #[allow(clippy::collapsible_if)]
-                    if new_active != active_output {
-                        if !self.maybe_warp_cursor_to_focus_centered() {
-                            self.move_cursor_to_output(&new_active.unwrap());
-                        }
-                    } else {
-                        self.maybe_warp_cursor_to_focus();
-                    }
-
-                    // FIXME: granular
-                    self.niri.queue_redraw_all();
+                    self.focus_window(&window);
+                }
+            }
+            Action::FocusWindowPrevious => {
+                if let Some(window) = self.niri.previously_focused_window.clone() {
+                    self.focus_window(&window);
                 }
             }
             Action::SwitchLayout(action) => {
@@ -1089,8 +1085,8 @@ impl State {
                             self.niri.layout.move_to_workspace(Some(&window), index);
 
                             // If we focused the target window.
-                            let new_active_win = self.niri.layout.active_window();
-                            if new_active_win.map_or(false, |(win, _)| win.window == window) {
+                            let new_focus = self.niri.layout.focus();
+                            if new_focus.map_or(false, |win| win.window == window) {
                                 self.maybe_warp_cursor_to_focus();
                             }
                         }
@@ -1838,6 +1834,12 @@ impl State {
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
         let source = event.source();
+
+        // We received an event for the regular pointer, so show it now. This is also needed for
+        // update_pointer_contents() below to return the real contents, necessary for the pointer
+        // axis event to reach the window.
+        self.niri.pointer_hidden = false;
+        self.niri.tablet_cursor_location = None;
 
         let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
         let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
@@ -3115,6 +3117,7 @@ pub fn mods_with_finger_scroll_binds(comp_mod: CompositorMod, binds: &Binds) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::Clock;
 
     #[test]
     fn bindings_suppress_keys() {
@@ -3133,7 +3136,7 @@ mod tests {
         let comp_mod = CompositorMod::Super;
         let mut suppressed_keys = HashSet::new();
 
-        let screenshot_ui = ScreenshotUi::new(Default::default());
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
         let disable_power_key_handling = false;
 
         // The key_code we pick is arbitrary, the only thing

@@ -10,9 +10,9 @@ use std::time::Duration;
 use bitflags::bitflags;
 use knuffel::errors::DecodeError;
 use knuffel::Decode as _;
+use layer_rule::LayerRule;
 use miette::{miette, Context, IntoDiagnostic, NarratableReportHandler};
 use niri_ipc::{ConfiguredMode, LayoutSwitchTarget, SizeChange, Transform, WorkspaceReferenceArg};
-use regex::Regex;
 use smithay::backend::renderer::Color32F;
 use smithay::input::keyboard::keysyms::KEY_NoSymbol;
 use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE};
@@ -20,6 +20,11 @@ use smithay::input::keyboard::{Keysym, XkbConfig};
 use smithay::reexports::input;
 
 pub const DEFAULT_BACKGROUND_COLOR: Color = Color::from_array_unpremul([0.2, 0.2, 0.2, 1.]);
+
+pub mod layer_rule;
+
+mod utils;
+pub use utils::RegexEq;
 
 #[derive(knuffel::Decode, Debug, PartialEq)]
 pub struct Config {
@@ -51,6 +56,8 @@ pub struct Config {
     pub environment: Environment,
     #[knuffel(children(name = "window-rule"))]
     pub window_rules: Vec<WindowRule>,
+    #[knuffel(children(name = "layer-rule"))]
+    pub layer_rules: Vec<LayerRule>,
     #[knuffel(child, default)]
     pub binds: Binds,
     #[knuffel(child, default)]
@@ -437,6 +444,8 @@ pub struct Layout {
     pub center_focused_column: CenterFocusedColumn,
     #[knuffel(child)]
     pub always_center_single_column: bool,
+    #[knuffel(child)]
+    pub empty_workspace_above_first: bool,
     #[knuffel(child, unwrap(argument), default = Self::default().gaps)]
     pub gaps: FloatOrInt<0, 65535>,
     #[knuffel(child, default)]
@@ -453,6 +462,7 @@ impl Default for Layout {
             default_column_width: Default::default(),
             center_focused_column: Default::default(),
             always_center_single_column: false,
+            empty_workspace_above_first: false,
             gaps: FloatOrInt(16.),
             struts: Default::default(),
             preset_window_heights: Default::default(),
@@ -1002,13 +1012,12 @@ pub struct WindowRule {
     pub variable_refresh_rate: Option<bool>,
 }
 
-// Remember to update the PartialEq impl when adding fields!
-#[derive(knuffel::Decode, Debug, Default, Clone)]
+#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
 pub struct Match {
     #[knuffel(property, str)]
-    pub app_id: Option<Regex>,
+    pub app_id: Option<RegexEq>,
     #[knuffel(property, str)]
-    pub title: Option<Regex>,
+    pub title: Option<RegexEq>,
     #[knuffel(property)]
     pub is_active: Option<bool>,
     #[knuffel(property)]
@@ -1017,17 +1026,6 @@ pub struct Match {
     pub is_active_in_column: Option<bool>,
     #[knuffel(property)]
     pub at_startup: Option<bool>,
-}
-
-impl PartialEq for Match {
-    fn eq(&self, other: &Self) -> bool {
-        self.is_active == other.is_active
-            && self.is_focused == other.is_focused
-            && self.is_active_in_column == other.is_active_in_column
-            && self.at_startup == other.at_startup
-            && self.app_id.as_ref().map(Regex::as_str) == other.app_id.as_ref().map(Regex::as_str)
-            && self.title.as_ref().map(Regex::as_str) == other.title.as_ref().map(Regex::as_str)
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -1168,6 +1166,7 @@ pub enum Action {
     FullscreenWindowById(u64),
     #[knuffel(skip)]
     FocusWindow(u64),
+    FocusWindowPrevious,
     FocusColumnLeft,
     FocusColumnRight,
     FocusColumnFirst,
@@ -1274,6 +1273,7 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::FullscreenWindow { id: None } => Self::FullscreenWindow,
             niri_ipc::Action::FullscreenWindow { id: Some(id) } => Self::FullscreenWindowById(id),
             niri_ipc::Action::FocusWindow { id } => Self::FocusWindow(id),
+            niri_ipc::Action::FocusWindowPrevious {} => Self::FocusWindowPrevious,
             niri_ipc::Action::FocusColumnLeft {} => Self::FocusColumnLeft,
             niri_ipc::Action::FocusColumnRight {} => Self::FocusColumnRight,
             niri_ipc::Action::FocusColumnFirst {} => Self::FocusColumnFirst,
@@ -1528,6 +1528,8 @@ pub struct DebugConfig {
     #[knuffel(child, unwrap(argument))]
     pub render_drm_device: Option<PathBuf>,
     #[knuffel(child)]
+    pub force_pipewire_invalid_modifier: bool,
+    #[knuffel(child)]
     pub emulate_zero_presentation_time: bool,
     #[knuffel(child)]
     pub disable_resize_throttling: bool,
@@ -1537,6 +1539,8 @@ pub struct DebugConfig {
     pub keep_laptop_panel_on_when_lid_is_closed: bool,
     #[knuffel(child)]
     pub disable_monitor_names: bool,
+    #[knuffel(child)]
+    pub strict_new_window_focus_policy: bool,
 }
 
 #[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
@@ -2929,7 +2933,7 @@ pub fn set_miette_hook() -> Result<(), miette::InstallError> {
 
 #[cfg(test)]
 mod tests {
-    use k9::snapshot;
+    use insta::assert_debug_snapshot;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -3129,6 +3133,11 @@ mod tests {
                 }
             }
 
+            layer-rule {
+                match namespace="^notifications$"
+                block-out-from "screencast"
+            }
+
             binds {
                 Mod+T allow-when-locked=true { spawn "alacritty"; }
                 Mod+Q { close-window; }
@@ -3308,6 +3317,7 @@ mod tests {
                     },
                     center_focused_column: CenterFocusedColumn::OnOverflow,
                     always_center_single_column: false,
+                    empty_workspace_above_first: false,
                 },
                 spawn_at_startup: vec![SpawnAtStartup {
                     command: vec!["alacritty".to_owned(), "-e".to_owned(), "fish".to_owned()],
@@ -3361,7 +3371,7 @@ mod tests {
                 ]),
                 window_rules: vec![WindowRule {
                     matches: vec![Match {
-                        app_id: Some(Regex::new(".*alacritty").unwrap()),
+                        app_id: Some(RegexEq::from_str(".*alacritty").unwrap()),
                         title: None,
                         is_active: None,
                         is_focused: None,
@@ -3371,7 +3381,7 @@ mod tests {
                     excludes: vec![
                         Match {
                             app_id: None,
-                            title: Some(Regex::new("~").unwrap()),
+                            title: Some(RegexEq::from_str("~").unwrap()),
                             is_active: None,
                             is_focused: None,
                             is_active_in_column: None,
@@ -3401,6 +3411,17 @@ mod tests {
                     },
                     ..Default::default()
                 }],
+                layer_rules: vec![
+                    LayerRule {
+                        matches: vec![layer_rule::Match {
+                            namespace: Some(RegexEq::from_str("^notifications$").unwrap()),
+                            at_startup: None,
+                        }],
+                        excludes: vec![],
+                        opacity: None,
+                        block_out_from: Some(BlockOutFrom::Screencast),
+                    }
+                ],
                 workspaces: vec![
                     Workspace {
                         name: WorkspaceName("workspace-1".to_string()),
@@ -3812,9 +3833,9 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        snapshot!(
+        assert_debug_snapshot!(
             names,
-            r#"
+            @r#"
 [
     "Unknown A A | DP-3",
     "A Unknown A | DP-3",

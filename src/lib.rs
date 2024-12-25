@@ -11,6 +11,7 @@ pub mod frame_clock;
 pub mod handlers;
 pub mod input;
 pub mod ipc;
+pub mod layer;
 pub mod layout;
 pub mod niri;
 pub mod protocols;
@@ -27,3 +28,6 @@ pub mod pw_utils;
 
 #[cfg(not(feature = "xdp-gnome-screencast"))]
 pub use dummy_pw_utils as pw_utils;
+
+#[cfg(test)]
+mod tests;
