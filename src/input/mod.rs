@@ -14,7 +14,7 @@ use smithay::backend::input::{
     InputEvent, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
     PointerButtonEvent, PointerMotionEvent, ProximityState, Switch, SwitchState, SwitchToggleEvent,
     TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
-    TabletToolTipState, TouchEvent,
+    TabletToolTipState, TouchEvent, UnusedEvent,
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::keyboard::{keysyms, FilterResult, Keysym, ModifiersState};
@@ -38,6 +38,7 @@ use touch_move_grab::TouchMoveGrab;
 use self::move_grab::MoveGrab;
 use self::resize_grab::ResizeGrab;
 use self::spatial_movement_grab::SpatialMovementGrab;
+use crate::backend::wayland::{WaylandInputBackend, WaylandInputSpecialEvent};
 use crate::niri::State;
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::spawn;
@@ -81,10 +82,104 @@ impl<D: SeatHandler> PointerOrTouchStartData<D> {
     }
 }
 
+pub trait ProcessSpecialEvent<I: InputBackend> {
+    fn on_special_event(&mut self, event: I::SpecialEvent);
+}
+
+impl<I: InputBackend<SpecialEvent = UnusedEvent>> ProcessSpecialEvent<I> for State {
+    fn on_special_event(&mut self, event: UnusedEvent) {
+        match event {}
+    }
+}
+
+impl ProcessSpecialEvent<WaylandInputBackend> for State {
+    fn on_special_event(&mut self, event: WaylandInputSpecialEvent) {
+        match event {
+            WaylandInputSpecialEvent::PointerEnter {
+                pointer,
+                serial,
+                surface_x,
+                surface_y,
+                transform,
+                window_size,
+            } => {
+                // Hide the cursor; we are compositing our own.
+                pointer.set_cursor(serial, None, 0, 0);
+
+                self.move_cursor(
+                    crate::backend::wayland::RawAbsolutePosition::new(
+                        surface_x,
+                        surface_y,
+                        transform,
+                        window_size,
+                    )
+                    .position(),
+                );
+            }
+            WaylandInputSpecialEvent::PointerLeave { .. } => {
+                // Hide our cursor; the pointer isn't on our surface anymore.
+                self.niri.pointer_hidden = true;
+            }
+            WaylandInputSpecialEvent::KeyboardEnter { keys, .. } => {
+                let keyboard = self.niri.seat.get_keyboard().unwrap();
+
+                // Normally, we keep track of supressed_keys to prevent a key press we intercepted
+                // from sending a corresponding key release to clients (which would leak the key
+                // press). However, if we lost keyboard focus and regain it, the supressed key may
+                // already be released, in which case we should remove it from the supressed_keys
+                // hashmap, because we don't want to supress the *next* release if its
+                // corresponding press shouldn't be intercepted.
+                self.niri.suppressed_keys.retain(|key| keys.contains(key));
+
+                // Resume any pressed keys from prior to gaining keyboard focus.
+                for key in keys {
+                    keyboard.input_intercept(self, key, KeyState::Pressed, |_, _, _| ());
+                }
+
+                self.niri.compositor_has_keyboard_focus = true;
+            }
+            WaylandInputSpecialEvent::KeyboardLeave { .. } => {
+                let keyboard = self.niri.seat.get_keyboard().unwrap();
+                // Prevent any repeats from happening when we don't have keyboard focus.
+                for keycode in keyboard.pressed_keys() {
+                    keyboard.input_intercept(self, keycode, KeyState::Released, |_, _, _| ());
+                }
+
+                self.niri.compositor_has_keyboard_focus = false;
+            }
+            WaylandInputSpecialEvent::KeyboardModifiers {
+                depressed,
+                latched,
+                locked,
+                group,
+                ..
+            } => {
+                // why is this called "group" in wl_keyboard but "layout" in smithay?
+                let layout = smithay::input::keyboard::Layout(group);
+
+                let keyboard = self.niri.seat.get_keyboard().unwrap();
+
+                // called once in the wayland backend's init() method
+                // keyboard.set_update_key(false);
+                keyboard.with_xkb_state(self, |mut xkb| {
+                    xkb.update_mask(depressed, latched, locked, layout);
+                });
+            }
+            WaylandInputSpecialEvent::KeyboardKeymap { .. } => {
+                debug!("Got keymap; ignoring")
+            }
+            WaylandInputSpecialEvent::KeyboardRepeatInfo { rate, delay, .. } => {
+                debug!("Got key repeat info; ignoring (rate={rate}, delay={delay})")
+            }
+        }
+    }
+}
+
 impl State {
     pub fn process_input_event<I: InputBackend + 'static>(&mut self, event: InputEvent<I>)
     where
         I::Device: 'static, // Needed for downcasting.
+        State: ProcessSpecialEvent<I>,
     {
         let _span = tracy_client::span!("process_input_event");
 
@@ -153,7 +248,7 @@ impl State {
             TouchCancel { event } => self.on_touch_cancel::<I>(event),
             TouchFrame { event } => self.on_touch_frame::<I>(event),
             SwitchToggle { event } => self.on_switch_toggle::<I>(event),
-            Special(_) => (),
+            Special(special) => self.on_special_event(special),
         }
 
         // Do this last so that screenshot still gets it.
